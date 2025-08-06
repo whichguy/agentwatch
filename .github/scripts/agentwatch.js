@@ -168,7 +168,7 @@ async function launchAgent(agentName, context, github) {
   
   try {
     // Try to load agent from agents directory
-    const agentPath = `./.github/scripts/agents/${agentName}.js`;
+    const agentPath = path.join(__dirname, 'agents', `${agentName}.js`);
     
     if (fs.existsSync(agentPath)) {
       console.log(`Loading agent from: ${agentPath}`);
