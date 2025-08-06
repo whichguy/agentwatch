@@ -128,49 +128,116 @@ jobs:
 
 # Examples:
 
-# Simple (using registry name)
+# Simple logical name (searches local first, then well-known repo)
 @agent-watch *.js security
 
 # With workflow inputs (passed to 'with:' in workflow)
 @agent-watch *.js security with:severity=high with:auto_fix=true with:report_format=json
 
-# With environment variables
-@agent-watch *.js lint env:NODE_ENV=production env:STRICT_MODE=true
+# With environment variables and wildcards
+@agent-watch *.js lint env:NODE_ENV=production env:CI_*
 
-# With secrets (references existing repo secrets)
-@agent-watch *.js deploy secrets:API_KEY secrets:DEPLOY_TOKEN
+# With secrets wildcards
+@agent-watch *.js deploy secrets:AWS_* secrets:DEPLOY_TOKEN
 
-# Combined
-@agent-watch src/**/*.ts typecheck with:strict=true with:lib=es2022 env:CI=true
+# Pass all environment variables and secrets
+@agent-watch *.js test env:* secrets:*
+
+# Combined with wildcards
+@agent-watch src/**/*.ts typecheck with:strict=true env:NODE_* secrets:NPM_*
 
 # Full workflow reference with inputs
-@agent-watch *.js uses:agentwatch/agents/.github/workflows/security.yml@v1 with:scan_depth=full
+@agent-watch *.js uses:myorg/security-workflows/.github/workflows/scanner.yml@v2 with:scan_depth=full
 
-# Local workflow
-@agent-watch *.js uses:./.github/workflows/my-scanner.yml with:config_file=.scannerrc
+# Local workflow (explicit)
+@agent-watch *.js uses:./.github/workflows/agent-custom.yml with:config_file=.scannerrc
+
+# Error handling examples:
+
+# If workflow not found locally or in well-known repo:
+# ❌ Error: Cannot resolve workflow 'nonexistent'
+# Searched:
+#   - ./.github/workflows/agent-nonexistent.yml (not found)
+#   - agentwatch/agents/.github/workflows/nonexistent.yml@main (not found)
+
+# If explicit workflow reference invalid:
+# ❌ Error: Workflow not found: uses:invalid/repo/.github/workflows/test.yml@main
+# Please verify the repository and workflow path exists
 ```
 
 ### Argument Parsing Rules
 
 1. **Pattern**: First argument, supports glob patterns
-2. **Workflow**: Second argument, either:
-   - Short name from registry (e.g., `security`)
-   - Full reference (e.g., `uses:owner/repo/.github/workflows/file.yml@ref`)
-   - Local reference (e.g., `uses:./.github/workflows/file.yml`)
+2. **Workflow**: Second argument, resolved in order:
+   - **Local name**: Looks for `./.github/workflows/agent-{name}.yml` in current repo
+   - **Well-known name**: Looks for `agentwatch/agents/.github/workflows/{name}.yml@main`
+   - **Full reference**: Direct `uses:` syntax like `uses:owner/repo/.github/workflows/file.yml@ref`
+   
+   Resolution process with validation:
+   ```javascript
+   async function resolveWorkflow(name, github) {
+     // 1. Check local repo first
+     const localPath = `.github/workflows/agent-${name}.yml`;
+     try {
+       await github.rest.repos.getContent({
+         owner: context.repo.owner,
+         repo: context.repo.repo,
+         path: localPath
+       });
+       return `uses:./${localPath}`;
+     } catch (e) {
+       // Not found locally
+     }
+     
+     // 2. Check well-known repo
+     try {
+       await github.rest.repos.getContent({
+         owner: 'agentwatch',
+         repo: 'agents',
+         path: `.github/workflows/${name}.yml`
+       });
+       return `uses:agentwatch/agents/.github/workflows/${name}.yml@main`;
+     } catch (e) {
+       // Not found in well-known
+     }
+     
+     // 3. If starts with 'uses:', validate it exists
+     if (name.startsWith('uses:')) {
+       // Parse and validate the workflow exists
+       const match = name.match(/uses:([^/]+)\/([^/]+)\/(.+)@(.+)/);
+       if (match) {
+         const [, owner, repo, path, ref] = match;
+         try {
+           await github.rest.repos.getContent({
+             owner, repo, path, ref
+           });
+           return name;
+         } catch (e) {
+           throw new Error(`Workflow not found: ${name}`);
+         }
+       }
+     }
+     
+     throw new Error(`Cannot resolve workflow: ${name}`);
+   }
+   ```
 
 3. **Inputs** (`with:`): Key-value pairs passed to workflow's `inputs`
    - Format: `with:key=value`
    - Multiple inputs: Space-separated
    - Complex values: Use quotes `with:config='{"deep": true}'`
 
-4. **Environment** (`env:`): Environment variables for the workflow
-   - Format: `env:KEY=value`
-   - Passed to workflow's `env` context
+4. **Environment** (`env:`): Environment variables with wildcard support
+   - Format: `env:KEY=value` for specific variable
+   - Wildcard: `env:AWS_*` to pass all AWS_ prefixed variables
+   - All envs: `env:*` to pass all environment variables
+   - Example: `env:NODE_*` passes NODE_ENV, NODE_OPTIONS, etc.
 
-5. **Secrets** (`secrets:`): Repository secrets to pass
-   - Format: `secrets:SECRET_NAME`
-   - References existing repository secrets
-   - Or `secrets:inherit` to pass all secrets
+5. **Secrets** (`secrets:`): Repository secrets with wildcard support
+   - Format: `secrets:SECRET_NAME` for specific secret
+   - Wildcard: `secrets:API_*` to pass all API_ prefixed secrets
+   - All secrets: `secrets:*` or `secrets:inherit` to pass all
+   - Example: `secrets:AWS_*` passes AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, etc.
 
 ### @agent-run
 ```bash
@@ -406,9 +473,9 @@ jobs:
 ### 2. Argument Parsing Implementation
 
 ```javascript
-// Parser for @agent-watch commands
-function parseAgentWatch(command) {
-  // Example: @agent-watch *.js security with:severity=high with:auto_fix=true env:NODE_ENV=production secrets:API_KEY
+// Parser for @agent-watch commands with wildcard support
+async function parseAgentWatch(command, github) {
+  // Example: @agent-watch *.js security with:severity=high env:NODE_* secrets:AWS_*
   
   const parts = command.split(/\s+/);
   let pattern = parts[1];
@@ -417,10 +484,25 @@ function parseAgentWatch(command) {
   const config = {
     pattern,
     workflow,
+    workflow_ref: null, // Will be resolved
     inputs: {},
     env: {},
     secrets: []
   };
+  
+  // Resolve workflow to full reference
+  try {
+    config.workflow_ref = await resolveWorkflow(workflow, github);
+  } catch (error) {
+    // Post error comment
+    await github.rest.issues.createComment({
+      owner: context.repo.owner,
+      repo: context.repo.repo,
+      issue_number: context.payload.issue.number,
+      body: `❌ **AgentWatch Error: Workflow Not Found**\n\n${error.message}\n\nSearched locations:\n- \`./.github/workflows/agent-${workflow}.yml\` (local)\n- \`agentwatch/agents/.github/workflows/${workflow}.yml@main\` (well-known)\n\nPlease verify the workflow name or provide a full reference using \`uses:\` syntax.`
+    });
+    return null;
+  }
   
   // Parse remaining arguments
   for (let i = 3; i < parts.length; i++) {
@@ -429,20 +511,86 @@ function parseAgentWatch(command) {
     if (arg.startsWith('with:')) {
       const [key, value] = arg.substring(5).split('=');
       config.inputs[key] = value;
+      
     } else if (arg.startsWith('env:')) {
-      const [key, value] = arg.substring(4).split('=');
-      config.env[key] = value;
+      const envSpec = arg.substring(4);
+      
+      if (envSpec === '*') {
+        // Pass all environment variables
+        config.env['*'] = true;
+      } else if (envSpec.includes('*')) {
+        // Wildcard pattern
+        const prefix = envSpec.replace('*', '');
+        config.env[`${prefix}*`] = true;
+      } else {
+        // Specific env var
+        const [key, value] = envSpec.split('=');
+        config.env[key] = value || process.env[key];
+      }
+      
     } else if (arg.startsWith('secrets:')) {
       const secret = arg.substring(8);
-      if (secret === 'inherit') {
+      
+      if (secret === '*' || secret === 'inherit') {
         config.secrets = 'inherit';
+      } else if (secret.includes('*')) {
+        // Wildcard pattern for secrets
+        config.secrets.push(secret);
       } else {
+        // Specific secret
         config.secrets.push(secret);
       }
     }
   }
   
   return config;
+}
+
+// Expand wildcards at runtime
+async function expandWildcards(config, github) {
+  const expanded = { ...config };
+  
+  // Expand environment variable wildcards
+  if (config.env['*']) {
+    expanded.env = process.env;
+  } else {
+    for (const [key, value] of Object.entries(config.env)) {
+      if (key.endsWith('*')) {
+        const prefix = key.slice(0, -1);
+        for (const [envKey, envValue] of Object.entries(process.env)) {
+          if (envKey.startsWith(prefix)) {
+            expanded.env[envKey] = envValue;
+          }
+        }
+        delete expanded.env[key];
+      }
+    }
+  }
+  
+  // Expand secret wildcards
+  if (config.secrets !== 'inherit' && Array.isArray(config.secrets)) {
+    const { data: secrets } = await github.rest.actions.listRepoSecrets({
+      owner: context.repo.owner,
+      repo: context.repo.repo
+    });
+    
+    const expandedSecrets = [];
+    for (const pattern of config.secrets) {
+      if (pattern.includes('*')) {
+        const prefix = pattern.replace('*', '');
+        for (const secret of secrets.secrets) {
+          if (secret.name.startsWith(prefix)) {
+            expandedSecrets.push(secret.name);
+          }
+        }
+      } else {
+        expandedSecrets.push(pattern);
+      }
+    }
+    expanded.secrets = expandedSecrets;
+  }
+  
+  return expanded;
 }
 ```
 
@@ -539,10 +687,115 @@ agents:
   - Cache pattern lookups
   - Use artifacts for inter-job communication
 
+## Workflow Discovery & Validation
+
+### Resolution Order
+1. **Local Repository** (`./.github/workflows/agent-{name}.yml`)
+   - Allows custom agents specific to the repository
+   - Enables testing and development of new agents
+   - Takes precedence for security and control
+
+2. **Well-Known Repository** (`agentwatch/agents/.github/workflows/{name}.yml@main`)
+   - Community-maintained agent library
+   - Versioned and stable workflows
+   - Default fallback for common agents
+
+3. **Explicit Reference** (`uses:owner/repo/.github/workflows/file.yml@ref`)
+   - Full control over workflow source
+   - Support for private repositories
+   - Specific version pinning
+
+### Validation Process
+```javascript
+async function validateAndPostError(workflow, github, prNumber) {
+  const searches = [];
+  
+  // Track what we searched
+  if (!workflow.startsWith('uses:')) {
+    searches.push({
+      location: `./.github/workflows/agent-${workflow}.yml`,
+      type: 'local',
+      found: false
+    });
+    searches.push({
+      location: `agentwatch/agents/.github/workflows/${workflow}.yml@main`,
+      type: 'well-known',
+      found: false
+    });
+  } else {
+    searches.push({
+      location: workflow,
+      type: 'explicit',
+      found: false
+    });
+  }
+  
+  // Build error message
+  const errorBody = `❌ **AgentWatch Error: Workflow Not Found**
+
+**Workflow**: \`${workflow}\`
+
+**Searched Locations**:
+${searches.map(s => `- ${s.type}: \`${s.location}\` ${s.found ? '✅' : '❌ not found'}`).join('\n')}
+
+**How to Fix**:
+1. Check the workflow name spelling
+2. Ensure the workflow exists in one of the locations above
+3. Use explicit reference: \`uses:owner/repo/.github/workflows/file.yml@ref\`
+4. Create a local workflow: \`./.github/workflows/agent-${workflow}.yml\`
+
+**Example Commands**:
+\`\`\`bash
+# Using well-known agent
+@agent-watch *.js security
+
+# Using local workflow
+@agent-watch *.js custom-scanner
+
+# Using explicit reference
+@agent-watch *.js uses:myorg/workflows/.github/workflows/scan.yml@v1
+\`\`\``;
+
+  await github.rest.issues.createComment({
+    owner: context.repo.owner,
+    repo: context.repo.repo,
+    issue_number: prNumber,
+    body: errorBody
+  });
+}
+```
+
+### Workflow Suggestions
+When a workflow isn't found, suggest similar ones:
+```javascript
+async function suggestWorkflows(name, github) {
+  const suggestions = [];
+  
+  // Get list of available workflows
+  const localWorkflows = await getLocalWorkflows(github);
+  const wellKnownWorkflows = await getWellKnownWorkflows(github);
+  
+  // Find similar names (Levenshtein distance)
+  const similar = [...localWorkflows, ...wellKnownWorkflows]
+    .map(w => ({ name: w, distance: levenshtein(name, w) }))
+    .filter(w => w.distance <= 3)
+    .sort((a, b) => a.distance - b.distance)
+    .slice(0, 3);
+  
+  if (similar.length > 0) {
+    return `\n**Did you mean?**\n${similar.map(s => `- \`${s.name}\``).join('\n')}`;
+  }
+  
+  return '';
+}
+```
+
 ## Next Steps
 
 1. Build proof of concept with single reusable workflow
-2. Create agent registry mechanism
-3. Update parser to handle workflow references
-4. Migrate existing agents to workflows
-5. Document workflow creation process
+2. Create agent registry mechanism  
+3. Update parser to handle workflow references and wildcards
+4. Implement workflow resolution with validation
+5. Migrate existing agents to workflows
+6. Document workflow creation process
+7. Create well-known agent repository structure
