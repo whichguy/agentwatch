@@ -95,19 +95,7 @@ async function handleComment(context, github) {
   }
   
   try {
-    // 1. Add monitoring labels to PR
-    const agentLabel = `agentwatch:${agentName}`;
-    const runningLabel = `agentwatch:running`;
-    
-    await github.rest.issues.addLabels({
-      owner: context.repo.owner,
-      repo: context.repo.repo,
-      issue_number: prNumber,
-      labels: [agentLabel, runningLabel]
-    });
-    console.log(`Added labels: ${agentLabel}, ${runningLabel}`);
-    
-    // 2. Launch agent for each target file
+    // Launch agent for each target file (labels handled inside launchAgent)
     const results = [];
     for (const targetFile of targetFiles) {
       const fileContext = {
@@ -126,19 +114,6 @@ async function handleComment(context, github) {
       console.log(`Launching ${agentName} for file: ${targetFile}`);
       await launchAgent(agentName, fileContext, github);
       results.push(targetFile);
-    }
-    
-    // 3. Remove running label after completion
-    try {
-      await github.rest.issues.removeLabel({
-        owner: context.repo.owner,
-        repo: context.repo.repo,
-        issue_number: prNumber,
-        name: runningLabel
-      });
-      console.log(`Removed running label`);
-    } catch (labelError) {
-      console.log(`Could not remove running label: ${labelError.message}`);
     }
     
     // 4. Confirm command execution
@@ -413,10 +388,13 @@ async function handleFileChanges(context, github) {
     
     // Launch agents for watched files that changed
     for (const comment of watchComments) {
-      const agentMatch = comment.body.match(/@agentwatch\s+(\w+)\s*(.*)/);
+      const agentMatch = comment.body.match(/@agentwatch\s+([^\s]+)\s+(\w+)\s*(.*)/);
       if (!agentMatch) continue;
       
-      const [, agentName, argsString] = agentMatch;
+      const [, fileTarget, agentName, argsString] = agentMatch;
+      
+      // Skip if file doesn't match the target
+      if (fileTarget !== '*' && fileTarget !== comment.path) continue;
       
       const fileContext = {
         file_path: comment.path,
@@ -576,34 +554,8 @@ async function handleNewPR(context, github) {
         
         console.log(`Auto-launching ${pattern.agent} for ${file} (pattern from PR #${pattern.sourcePR})`);
         
-        // Add running label before execution
-        const runningLabel = `agentwatch:running`;
-        const agentLabel = `agentwatch:${pattern.agent}`;
-        
-        try {
-          await github.rest.issues.addLabels({
-            owner: context.repo.owner,
-            repo: context.repo.repo,
-            issue_number: context.payload.pull_request.number,
-            labels: [agentLabel, runningLabel]
-          });
-        } catch (labelError) {
-          console.log(`Failed to add labels: ${labelError.message}`);
-        }
-        
+        // Labels are handled inside launchAgent for consistency
         await launchAgent(pattern.agent, fileContext, github);
-        
-        // Remove running label after execution
-        try {
-          await github.rest.issues.removeLabel({
-            owner: context.repo.owner,
-            repo: context.repo.repo,
-            issue_number: context.payload.pull_request.number,
-            name: runningLabel
-          });
-        } catch (labelError) {
-          console.log(`Could not remove running label: ${labelError.message}`);
-        }
         
         executionSummary.push(`- \`${file}\` → **${pattern.agent}** ${pattern.args} (from PR #${pattern.sourcePR})`)
       }
@@ -655,6 +607,26 @@ You can still use manual commands: \`@agentwatch <file|*> <agent> <args>\``
 async function launchAgent(agentName, context, github) {
   console.log(`Launching agent: ${agentName}`);
   
+  // Add running label at the start
+  const runningLabel = 'agentwatch:running';
+  const errorLabel = 'agentwatch:error';
+  const agentLabel = `agentwatch:${agentName}`;
+  
+  // Add running and agent labels
+  try {
+    await github.rest.issues.addLabels({
+      owner: context.repo.owner,
+      repo: context.repo.repo,
+      issue_number: context.pr_number,
+      labels: [agentLabel, runningLabel]
+    });
+    console.log(`Added labels: ${agentLabel}, ${runningLabel}`);
+  } catch (labelError) {
+    console.log(`Could not add labels: ${labelError.message}`);
+  }
+  
+  let agentError = null;
+  
   try {
     // Try to load agent from agents directory
     const agentPath = path.join(__dirname, 'agents', `${agentName}.js`);
@@ -674,12 +646,13 @@ async function launchAgent(agentName, context, github) {
     }
     
   } catch (error) {
+    agentError = error;
     console.error(`Failed to launch agent ${agentName}:`, error);
     
     // Post error as reply to original comment
     const errorMessage = `❌ **AgentWatch Error**
 
-Failed to run agent **${agentName}**: ${error.message}
+Failed to run agent **${agentName}**: ${agentError.message}
 
 **Available agents**: Check \`.github/scripts/agents/\` directory`;
 
@@ -704,6 +677,34 @@ Failed to run agent **${agentName}**: ${error.message}
       }
     } catch (replyError) {
       console.error('Failed to post error reply:', replyError);
+    }
+  } finally {
+    // Always remove running label and add error label if needed
+    try {
+      await github.rest.issues.removeLabel({
+        owner: context.repo.owner,
+        repo: context.repo.repo,
+        issue_number: context.pr_number,
+        name: runningLabel
+      });
+      console.log(`Removed running label`);
+    } catch (labelError) {
+      console.log(`Could not remove running label: ${labelError.message}`);
+    }
+    
+    // Add error label if there was an error
+    if (agentError) {
+      try {
+        await github.rest.issues.addLabels({
+          owner: context.repo.owner,
+          repo: context.repo.repo,
+          issue_number: context.pr_number,
+          labels: [errorLabel]
+        });
+        console.log(`Added error label due to: ${agentError.message}`);
+      } catch (labelError) {
+        console.log(`Could not add error label: ${labelError.message}`);
+      }
     }
   }
 }
