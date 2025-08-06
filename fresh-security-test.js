@@ -1,4 +1,5 @@
 // Brand new test file for AgentWatch fresh testing
+// Added LDAP injection and session management vulnerabilities
 class UserManager {
   constructor() {
     this.users = new Map();
@@ -32,10 +33,29 @@ class UserManager {
     return this.users.get(userId);
   }
 
+  // LDAP injection vulnerability
+  findUserInLDAP(username) {
+    const ldapQuery = `(uid=${username})`; // LDAP injection
+    return this.executeLDAPQuery(ldapQuery);
+  }
+
+  // Session fixation vulnerability
+  createSession(userId) {
+    const sessionId = "session_" + userId; // Predictable session ID
+    global.sessions = global.sessions || {};
+    global.sessions[sessionId] = { userId, created: Date.now() };
+    return sessionId; // No secure random generation
+  }
+
   executeQuery(sql) {
     console.log("Executing:", sql); // Potential log injection
     // Mock database execution
     return [];
+  }
+
+  executeLDAPQuery(query) {
+    console.log("LDAP Query:", query); // Log exposure
+    return []; // Mock LDAP results
   }
 }
 
