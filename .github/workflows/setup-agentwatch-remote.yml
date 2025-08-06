@@ -1,0 +1,190 @@
+name: Setup AgentWatch (Remote Install)
+# Triggered from other repositories to install AgentWatch
+
+on:
+  repository_dispatch:
+    types: [setup-agentwatch]
+  workflow_dispatch:
+    inputs:
+      target_repo:
+        description: 'Target repository (owner/repo)'
+        required: true
+        type: string
+      create_pr:
+        description: 'Create PR instead of direct push'
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  setup-agentwatch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout AgentWatch source
+        uses: actions/checkout@v4
+        
+      - name: Setup variables
+        id: vars
+        run: |
+          if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
+            TARGET_REPO="${{ github.event.client_payload.target_repo }}"
+            CREATE_PR="${{ github.event.client_payload.create_pr }}"
+          else
+            TARGET_REPO="${{ inputs.target_repo }}"
+            CREATE_PR="${{ inputs.create_pr }}"
+          fi
+          
+          echo "target_repo=$TARGET_REPO" >> $GITHUB_OUTPUT
+          echo "create_pr=$CREATE_PR" >> $GITHUB_OUTPUT
+          echo "owner=$(echo $TARGET_REPO | cut -d'/' -f1)" >> $GITHUB_OUTPUT
+          echo "repo=$(echo $TARGET_REPO | cut -d'/' -f2)" >> $GITHUB_OUTPUT
+          
+      - name: Checkout target repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ steps.vars.outputs.target_repo }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+          path: target-repo
+          
+      - name: Create AgentWatch branch
+        if: steps.vars.outputs.create_pr == 'true'
+        run: |
+          cd target-repo
+          git checkout -b setup-agentwatch-$(date +%s)
+          echo "BRANCH_NAME=$(git branch --show-current)" >> $GITHUB_ENV
+          
+      - name: Install AgentWatch files
+        run: |
+          cd target-repo
+          
+          # Create directory structure
+          mkdir -p .github/workflows
+          mkdir -p .github/scripts/agents
+          
+          # Copy AgentWatch files
+          cp ../.github/workflows/agentwatch.yml .github/workflows/
+          cp ../.github/scripts/agentwatch.js .github/scripts/
+          cp ../.github/scripts/agent-helpers.js .github/scripts/
+          cp ../.github/scripts/agents/*.js .github/scripts/agents/
+          cp ../.github/scripts/AGENTWATCH.md .github/scripts/
+          
+          # Create repository-specific config
+          cat > .github/agentwatch-config.yml << EOF
+          # AgentWatch Configuration for ${{ steps.vars.outputs.target_repo }}
+          version: "1.0"
+          installed: $(date -Iseconds)
+          source: "${{ github.repository }}"
+          
+          agents:
+            echo:
+              description: "Test agent for AgentWatch validation"
+              enabled: true
+            promptexpert:
+              description: "AI-powered code and prompt analysis"
+              enabled: true
+              requires_secrets: ["ANTHROPIC_API_KEY"]
+            lint:
+              description: "Basic code quality checks"
+              enabled: true
+          EOF
+          
+      - name: Commit changes
+        run: |
+          cd target-repo
+          git config --global user.name 'AgentWatch Setup'
+          git config --global user.email 'agentwatch@github.com'
+          
+          git add .
+          git commit -m "Setup AgentWatch: Add file-level agent monitoring
+
+          ✨ Added AgentWatch system for file-level agent monitoring
+          
+          🤖 Available agents:
+          - echo: Test agent (@agentwatch echo)
+          - promptexpert: AI analysis (@agentwatch promptexpert security)  
+          - lint: Code quality (@agentwatch lint)
+          
+          📋 Usage:
+          1. Comment on any file in PR: @agentwatch echo
+          2. Agent runs immediately on that specific file
+          3. Persistent monitoring on file changes
+          
+          🔧 Setup by: ${{ github.repository }}
+          📖 Documentation: .github/scripts/AGENTWATCH.md
+          
+          Ready to test with: @agentwatch echo preview"
+          
+      - name: Push changes
+        run: |
+          cd target-repo
+          if [ "${{ steps.vars.outputs.create_pr }}" = "true" ]; then
+            git push origin $BRANCH_NAME
+          else
+            git push origin main
+          fi
+          
+      - name: Create Pull Request
+        if: steps.vars.outputs.create_pr == 'true'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const { data: pr } = await github.rest.pulls.create({
+              owner: '${{ steps.vars.outputs.owner }}',
+              repo: '${{ steps.vars.outputs.repo }}',
+              title: '🤖 Setup AgentWatch: File-level agent monitoring',
+              head: process.env.BRANCH_NAME,
+              base: 'main',
+              body: `## 🎉 AgentWatch Installation Complete!
+
+            This PR adds **AgentWatch** - a file-level agent monitoring system that lets you tag specific files for AI analysis and monitoring.
+
+            ### ✨ What's Added
+            - **File-level tagging**: Comment \`@agentwatch echo\` on any file in PRs
+            - **Immediate execution**: Agents run instantly when you tag files  
+            - **Persistent monitoring**: Re-runs when tagged files change
+            - **3 built-in agents**: echo (test), promptexpert (AI), lint (quality)
+
+            ### 🚀 Ready to Test
+            After merging, try this on any file in a PR:
+            \`\`\`
+            @agentwatch echo preview
+            \`\`\`
+
+            ### 📖 Documentation
+            See \`.github/scripts/AGENTWATCH.md\` for full usage guide.
+
+            ### ⚙️ Setup Required
+            For **PromptExpert agent**, add this repository secret:
+            - \`ANTHROPIC_API_KEY\` - Your Anthropic API key
+
+            ---
+            *Installed from: [\`${{ github.repository }}\`](https://github.com/${{ github.repository }})*`
+            });
+            
+            console.log(\`Created PR #\${pr.number}: \${pr.html_url}\`);
+            
+      - name: Post completion message
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const targetRepo = '${{ steps.vars.outputs.target_repo }}';
+            const createPr = '${{ steps.vars.outputs.create_pr }}' === 'true';
+            
+            if (createPr) {
+              console.log(`✅ AgentWatch setup PR created for ${targetRepo}`);
+              console.log(`🔗 Check: https://github.com/${targetRepo}/pulls`);
+            } else {
+              console.log(`✅ AgentWatch installed directly to ${targetRepo}/main`);
+            }
+            
+            console.log(`
+            🎯 Next steps:
+            1. ${createPr ? 'Merge the setup PR' : 'Files are ready to use'}
+            2. Add ANTHROPIC_API_KEY secret for PromptExpert agent
+            3. Test with: @agentwatch echo preview (on any PR file)
+            `);

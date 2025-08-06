@@ -1,0 +1,38 @@
+name: AgentWatch
+# Simple file-level agent tagging and monitoring system
+# Tag files with: @agentwatch <agent> <args> in review comments
+
+on:
+  pull_request_review_comment:
+    types: [created]
+  pull_request:
+    types: [synchronize]
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  agentwatch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Install dependencies
+        run: |
+          npm init -y
+          npm install @octokit/rest
+
+      - name: Run AgentWatch
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { handleAgentWatch } = require('./.github/scripts/agentwatch.js');
+            await handleAgentWatch(context, github);

@@ -1,0 +1,50 @@
+name: Install AgentWatch (Target Repo Trigger)
+# Add this workflow to any repository to install AgentWatch
+
+on:
+  workflow_dispatch:
+    inputs:
+      create_pr:
+        description: 'Create PR instead of direct commit'
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  trigger-install:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger AgentWatch installation
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            // Trigger the setup workflow in the AgentWatch source repository
+            await github.rest.repos.createDispatchEvent({
+              owner: 'whichguy',  // AgentWatch repository owner  
+              repo: 'agentwatch',      // AgentWatch repository
+              event_type: 'setup-agentwatch',
+              client_payload: {
+                target_repo: context.repo.owner + '/' + context.repo.repo,
+                create_pr: ${{ inputs.create_pr }}
+              }
+            });
+            
+            console.log('✅ AgentWatch installation triggered');
+            console.log('🔍 Check the source repository for installation progress');
+            console.log('📍 Installation repo: https://github.com/whichguy/agentwatch/actions');
+            
+      - name: Wait and check status
+        run: |
+          echo "⏳ Installation in progress..."
+          echo "🔗 Monitor: https://github.com/whichguy/agentwatch/actions"
+          echo ""
+          echo "📋 What happens next:"
+          echo "1. AgentWatch files will be copied to this repository"
+          echo "2. ${{ inputs.create_pr && 'A setup PR will be created' || 'Files will be committed directly' }}"
+          echo "3. You'll get AgentWatch ready to use!"
+          echo ""
+          echo "🧪 Test after setup with: @agentwatch echo preview"
