@@ -31,6 +31,12 @@ class PaymentProcessor {
     this.users[userId] = { password: password }; // Plaintext storage
     console.log(`Stored password for user ${userId}`); // Password logging
   }
+  
+  // TEST: Pattern detection test - adding new method
+  exportData() {
+    // Exporting all sensitive data without sanitization
+    return JSON.stringify(this.users); // Exposes all passwords
+  }
 }
 
 export default PaymentProcessor;
