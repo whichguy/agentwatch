@@ -90,17 +90,45 @@ async function handleComment(context, github) {
     return handleWatchList(context, github);
   }
   
-  // Parse standard watch command: @agent-watch <file_pattern> <agent> <args>
-  // Examples: @agent-watch *.js echo preview
-  //          @agent-watch src/**/*.ts promptexpert security --deep
+  // Parse standard watch command: @agent-watch [watch-args] <file_pattern> <agent> [@ <agent-args>]
+  // Examples: @agent-watch *.js echo @ preview
+  //          @agent-watch --persist src/**/*.ts promptexpert @ security --deep
   //          @agent-watch test-*.js lint
-  const agentMatch = comment.match(/@agent-watch\s+([^\s]+)\s+(\w+)\s*(.*)/);
-  if (!agentMatch) {
-    await postError(context, github, 'Invalid @agent-watch command format. Use: @agent-watch <pattern> <agent> <args>');
+  const fullCommand = comment.match(/@agent-watch\s+(.+)/)?.[1] || '';
+  
+  // Split by @ to separate agentwatch args from agent args
+  let watchPart, agentArgs = '';
+  if (fullCommand.includes(' @ ')) {
+    [watchPart, agentArgs] = fullCommand.split(' @ ', 2);
+  } else {
+    watchPart = fullCommand;
+  }
+  
+  // Parse the watch part: [options] <pattern> <agent>
+  const watchParts = watchPart.trim().split(/\s+/);
+  if (watchParts.length < 2) {
+    await postError(context, github, 'Invalid @agent-watch command format. Use: @agent-watch [options] <pattern> <agent> [@ <agent-args>]');
     return;
   }
   
-  const [, fileTarget, agentName, argsString] = agentMatch;
+  // Extract options, pattern, and agent name
+  let watchOptions = '';
+  let fileTarget, agentName;
+  
+  if (watchParts[0].startsWith('--')) {
+    watchOptions = watchParts[0];
+    fileTarget = watchParts[1];
+    agentName = watchParts[2];
+  } else {
+    fileTarget = watchParts[0];
+    agentName = watchParts[1];
+    // If no @, remaining parts are agent args
+    if (!fullCommand.includes(' @ ') && watchParts.length > 2) {
+      agentArgs = watchParts.slice(2).join(' ');
+    }
+  }
+  
+  const argsString = agentArgs.trim();
   
   // Get PR number from either pull request or issue context
   const prNumber = context.payload.pull_request?.number || context.payload.issue?.number;
@@ -166,7 +194,7 @@ async function handleComment(context, github) {
 🎯 **Pattern**: \`${fileTarget}\`
 📁 **Matched Files**: ${fileList}
 🤖 **Agent**: **${agentName}**
-⚙️ **Args**: \`${argsString.trim() || 'none'}\`
+⚙️ **Args**: \`${argsString || 'none'}\`
 
 The agent:
 - ✅ **Ran now** on matched files
@@ -185,7 +213,7 @@ To stop watching this pattern, use \`@agent-unwatch ${fileTarget}\`.`;
 🎯 **Pattern**: \`${fileTarget}\`
 📁 **Matched Files**: None in this PR
 🤖 **Agent**: **${agentName}**
-⚙️ **Args**: \`${argsString.trim() || 'none'}\`
+⚙️ **Args**: \`${argsString || 'none'}\`
 
 ⚠️ No files currently match this pattern, but the pattern is saved for:
 - 🔄 **Future pushes** to this PR that add matching files
