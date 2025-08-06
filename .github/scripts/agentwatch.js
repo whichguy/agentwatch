@@ -121,6 +121,7 @@ async function handleComment(context, github) {
       `\`${targetFiles[0]}\`` : 
       `${targetFiles.length} files: ${targetFiles.map(f => `\`${f}\``).join(', ')}`;
     
+    const agentLabel = `agentwatch:${agentName}`;
     const confirmMessage = `✅ **AgentWatch: Command Executed**
 
 📁 **Files**: ${fileList}
@@ -131,8 +132,8 @@ The agent is now monitoring these files and will run:
 - ✅ **Immediately** (running now)
 - 🔄 **On changes** (future pushes)
 
-To stop watching in this PR, remove the \`${labelName}\` label.
-To stop watching in future PRs, use \`@agent-unwatch ${targetFiles.length === 1 ? targetFiles[0] : '*'}\`.
+To stop watching in this PR, remove the \`${agentLabel}\` label.
+To stop watching in future PRs, use \`@agent-unwatch ${targetFiles.length === 1 ? targetFiles[0] : '*'}\`.`;
 
     // Post response as PR comment or reply depending on context
     if (context.payload.comment.pull_request_review_id) {
