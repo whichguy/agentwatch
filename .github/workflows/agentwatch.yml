@@ -1,10 +1,22 @@
 name: AgentWatch
-# File-targeted agent monitoring system
-# Usage: @agent-watch <file|*> <agent> <args> in PR or file comments
+# File-targeted agent monitoring system with pattern matching
+# Usage: @agent-watch <pattern> <agent> <args> in PR or file comments
+# 
+# Pattern Examples:
+#   *.js                 - all JavaScript files
+#   src/**/*.ts          - all TypeScript files under src/
+#   test-*.js            - files matching test-*.js
+#   {app,lib}/*.js       - JS files in app/ or lib/ directories
+#
 # Commands:
-#   @agent-watch <file|*> <agent> <args> - Start watching file(s)
-#   @agent-unwatch <file|*> - Stop watching file(s) (* = all files)
-#   @agent-list - Show all currently watched files
+#   @agent-watch <pattern> <agent> <args> - Start watching files matching pattern
+#   @agent-unwatch <pattern>              - Stop watching pattern
+#   @agent-list                           - Show all active patterns
+#
+# Agents can be loaded from:
+#   1. Your repo: .github/agents/<agent>.js
+#   2. Built-in agents: echo, security, lint
+#   3. Well-known repo: github.com/agentwatch/agents
 
 on:
   pull_request_review_comment:

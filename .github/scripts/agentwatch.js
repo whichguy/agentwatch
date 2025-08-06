@@ -8,6 +8,47 @@
 const fs = require('fs');
 const path = require('path');
 
+/**
+ * Simple glob pattern matcher (zsh-style)
+ * Supports: *, **, ?, [abc], [a-z], {a,b,c}
+ */
+function matchPattern(pattern, filepath) {
+  // If pattern is just *, match everything
+  if (pattern === '*') return true;
+  
+  // Direct file match
+  if (pattern === filepath) return true;
+  
+  // Convert glob pattern to regex
+  let regexStr = pattern
+    // Escape regex special chars except our glob chars
+    .replace(/[.+^${}()|\\]/g, '\\$&')
+    // ** matches any number of directories
+    .replace(/\*\*/g, '.*')
+    // * matches anything except /
+    .replace(/\*/g, '[^/]*')
+    // ? matches single character
+    .replace(/\?/g, '.')
+    // [abc] character classes
+    .replace(/\[([^\]]+)\]/g, '[$1]')
+    // {a,b,c} alternatives
+    .replace(/\{([^}]+)\}/g, (match, group) => {
+      const options = group.split(',');
+      return '(' + options.join('|') + ')';
+    });
+  
+  // Add anchors for full match
+  regexStr = '^' + regexStr + '$';
+  
+  try {
+    const regex = new RegExp(regexStr);
+    return regex.test(filepath);
+  } catch (e) {
+    console.log(`Invalid pattern: ${pattern}`);
+    return false;
+  }
+}
+
 async function handleAgentWatch(context, github) {
   console.log(`AgentWatch triggered by: ${context.eventName}`);
   
@@ -49,12 +90,13 @@ async function handleComment(context, github) {
     return handleWatchList(context, github);
   }
   
-  // Parse standard watch command: @agent-watch <file_target> <agent> <args>
-  // Examples: @agent-watch fresh-security-test.js echo preview
-  //          @agent-watch * promptexpert security --deep
+  // Parse standard watch command: @agent-watch <file_pattern> <agent> <args>
+  // Examples: @agent-watch *.js echo preview
+  //          @agent-watch src/**/*.ts promptexpert security --deep
+  //          @agent-watch test-*.js lint
   const agentMatch = comment.match(/@agent-watch\s+([^\s]+)\s+(\w+)\s*(.*)/);
   if (!agentMatch) {
-    await postError(context, github, 'Invalid @agent-watch command format. Use: @agent-watch <file|*> <agent> <args>');
+    await postError(context, github, 'Invalid @agent-watch command format. Use: @agent-watch <pattern> <agent> <args>');
     return;
   }
   
@@ -73,31 +115,25 @@ async function handleComment(context, github) {
   const availableFiles = files.data.map(f => f.filename);
   console.log(`Available files in PR: ${availableFiles.join(', ')}`);
   
-  // Determine target files based on fileTarget parameter
-  let targetFiles = [];
-  if (fileTarget === '*') {
-    targetFiles = availableFiles;
-    console.log('Targeting ALL files in PR');
+  // Match files against pattern
+  let targetFiles = availableFiles.filter(file => matchPattern(fileTarget, file));
+  
+  if (targetFiles.length > 0) {
+    console.log(`Pattern '${fileTarget}' matched ${targetFiles.length} file(s): ${targetFiles.join(', ')}`);
   } else {
-    // Check if specified file exists in PR
-    if (availableFiles.includes(fileTarget)) {
-      targetFiles = [fileTarget];
-      console.log(`Targeting specific file: ${fileTarget}`);
-    } else {
-      await postError(context, github, `File "${fileTarget}" not found in PR. Available files: ${availableFiles.join(', ')}`);
-      return;
-    }
+    // If no match, check if it might be a future file pattern to watch
+    console.log(`Pattern '${fileTarget}' matched no current files, will monitor for future matches`);
+    // Still proceed to store the pattern for future PRs
+    targetFiles = []; // Will store pattern but not execute now
   }
   
-  if (targetFiles.length === 0) {
-    await postError(context, github, 'No files to analyze in this PR');
-    return;
-  }
+  // Remove check for empty targetFiles - we want to store patterns even if no current matches
   
   try {
     // Launch agent for each target file (labels handled inside launchAgent)
     const results = [];
-    for (const targetFile of targetFiles) {
+    if (targetFiles.length > 0) {
+      for (const targetFile of targetFiles) {
       const fileContext = {
         file_path: targetFile,
         pr_number: prNumber,
@@ -112,28 +148,47 @@ async function handleComment(context, github) {
       };
       
       console.log(`Launching ${agentName} for file: ${targetFile}`);
-      await launchAgent(agentName, fileContext, github);
-      results.push(targetFile);
+        await launchAgent(agentName, fileContext, github);
+        results.push(targetFile);
+      }
     }
     
     // 4. Confirm command execution
-    const fileList = targetFiles.length === 1 ? 
-      `\`${targetFiles[0]}\`` : 
-      `${targetFiles.length} files: ${targetFiles.map(f => `\`${f}\``).join(', ')}`;
-    
     const agentLabel = `agentwatch:${agentName}`;
-    const confirmMessage = `✅ **AgentWatch: Command Executed**
+    let confirmMessage;
+    
+    if (targetFiles.length > 0) {
+      const fileList = targetFiles.length === 1 ? 
+        `\`${targetFiles[0]}\`` : 
+        `${targetFiles.length} files: ${targetFiles.map(f => `\`${f}\``).join(', ')}`;
+      
+      confirmMessage = `✅ **AgentWatch: Pattern Registered & Executed**
 
-📁 **Files**: ${fileList}
+🎯 **Pattern**: \`${fileTarget}\`
+📁 **Matched Files**: ${fileList}
 🤖 **Agent**: **${agentName}**
 ⚙️ **Args**: \`${argsString.trim() || 'none'}\`
 
-The agent is now monitoring these files and will run:
-- ✅ **Immediately** (running now)
-- 🔄 **On changes** (future pushes)
+The agent:
+- ✅ **Ran now** on matched files
+- 🔄 **Will run** on future files matching this pattern
+- 📝 **Will trigger** in future PRs with matching files
 
-To stop watching in this PR, remove the \`${agentLabel}\` label.
-To stop watching in future PRs, use \`@agent-unwatch ${targetFiles.length === 1 ? targetFiles[0] : '*'}\`.`;
+To stop watching this pattern, use \`@agent-unwatch ${fileTarget}\`.`;
+    } else {
+      confirmMessage = `✅ **AgentWatch: Pattern Registered**
+
+🎯 **Pattern**: \`${fileTarget}\`
+📁 **Matched Files**: None in this PR
+🤖 **Agent**: **${agentName}**
+⚙️ **Args**: \`${argsString.trim() || 'none'}\`
+
+⚠️ No files currently match this pattern, but the pattern is saved for:
+- 🔄 **Future pushes** to this PR that add matching files
+- 📝 **Future PRs** with matching files
+
+To stop watching this pattern, use \`@agent-unwatch ${fileTarget}\`.`;
+    }
 
     // Post response as PR comment or reply depending on context
     if (context.payload.comment.pull_request_review_id) {
@@ -309,10 +364,10 @@ async function handleUnwatch(context, github) {
   const comment = context.payload.comment.body;
   console.log('Processing @agent-unwatch command...');
   
-  // Parse unwatch command: @agent-unwatch <file>
+  // Parse unwatch command: @agent-unwatch <pattern>
   const unwatchMatch = comment.match(/@agent-unwatch\s+([^\s]+)/);
   if (!unwatchMatch) {
-    await postError(context, github, 'Invalid @agent-unwatch command format. Use: @agent-unwatch <file|*>');
+    await postError(context, github, 'Invalid @agent-unwatch command format. Use: @agent-unwatch <pattern>');
     return;
   }
   
@@ -321,17 +376,17 @@ async function handleUnwatch(context, github) {
   
   let confirmMessage;
   if (fileToUnwatch === '*') {
-    confirmMessage = `✅ **AgentWatch: All Files Unwatched**
+    confirmMessage = `✅ **AgentWatch: All Patterns Cleared**
 
 🚫 **Cleared all watch patterns** - No files will be automatically monitored in future PRs.
 
 **Note**: This only affects future PRs. To stop monitoring in the current PR, remove the agentwatch labels.`;
   } else {
-    confirmMessage = `✅ **AgentWatch: File Unwatched**
+    confirmMessage = `✅ **AgentWatch: Pattern Unwatched**
 
-📁 **File**: \`${fileToUnwatch}\`
+🎯 **Pattern**: \`${fileToUnwatch}\`
 
-This file will no longer be automatically monitored in future PRs.
+Files matching this pattern will no longer be automatically monitored in future PRs.
 
 **Note**: This only affects future PRs. To stop monitoring in the current PR, remove the agentwatch labels.`;
   }
@@ -404,8 +459,8 @@ async function handleFileChanges(context, github) {
       
       const [, fileTarget, agentName, argsString] = agentMatch;
       
-      // Skip if file doesn't match the target
-      if (fileTarget !== '*' && fileTarget !== comment.path) continue;
+      // Skip if file doesn't match the pattern
+      if (!matchPattern(fileTarget, comment.path)) continue;
       
       const fileContext = {
         file_path: comment.path,
@@ -544,10 +599,17 @@ async function handleNewPR(context, github) {
     // Apply patterns to files in the new PR
     let matchedFiles = 0;
     const executionSummary = [];
+    const processedPatterns = new Set(); // Track which patterns we've processed
     
-    for (const file of filesInPR) {
-      if (watchPatterns.has(file)) {
-        const pattern = watchPatterns.get(file);
+    // Check each pattern against all files
+    for (const [patternStr, pattern] of watchPatterns) {
+      const matchingFiles = filesInPR.filter(file => matchPattern(patternStr, file));
+      
+      for (const file of matchingFiles) {
+        // Avoid duplicate processing
+        const key = `${file}:${pattern.agent}`;
+        if (processedPatterns.has(key)) continue;
+        processedPatterns.add(key);
         matchedFiles++;
         
         const fileContext = {
@@ -568,7 +630,7 @@ async function handleNewPR(context, github) {
         // Labels are handled inside launchAgent for consistency
         await launchAgent(pattern.agent, fileContext, github);
         
-        executionSummary.push(`- \`${file}\` → **${pattern.agent}** ${pattern.args} (from PR #${pattern.sourcePR})`)
+        executionSummary.push(`- \`${file}\` (pattern: \`${patternStr}\`) → **${pattern.agent}** ${pattern.args} (from PR #${pattern.sourcePR})`)
       }
     }
     
@@ -725,13 +787,19 @@ async function postError(context, github, message) {
 
 ${message}
 
-**Usage**: \`@agent-watch <file|*> <agent> <args>\` or \`@agent-unwatch <file|*>\` or \`@agent-list\`
-**Examples**:
-- \`@agent-watch fresh-security-test.js echo preview\` - analyze specific file
-- \`@agent-watch * promptexpert security --deep\` - analyze all files in PR
-- \`@agent-unwatch pattern-test-file.js\` - stop watching specific file
-- \`@agent-unwatch *\` - stop watching all files
-- \`@agent-list\` - list all currently watched files`;
+**Usage**: \`@agent-watch <pattern> <agent> <args>\` or \`@agent-unwatch <pattern>\` or \`@agent-list\`
+
+**Pattern Examples**:
+- \`@agent-watch *.js echo lint\` - all .js files
+- \`@agent-watch src/**/*.ts typescript check\` - all .ts files under src/
+- \`@agent-watch test-*.js test runner\` - files matching test-*.js
+- \`@agent-watch {app,lib}/*.js lint strict\` - .js files in app/ or lib/
+- \`@agent-watch * security scan\` - all files
+
+**Commands**:
+- \`@agent-unwatch *.js\` - stop watching pattern
+- \`@agent-unwatch *\` - clear all patterns
+- \`@agent-list\` - list all active patterns`;
 
   try {
     const prNumber = context.payload.pull_request?.number || context.payload.issue?.number;
