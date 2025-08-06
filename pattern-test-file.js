@@ -37,6 +37,13 @@ class PaymentProcessor {
     // Exporting all sensitive data without sanitization
     return JSON.stringify(this.users); // Exposes all passwords
   }
+  
+  // AUTO-DETECTION TEST: This should trigger automatically
+  deleteAllUsers() {
+    // Dangerous operation without confirmation
+    this.users.clear(); // No backup, no confirmation
+    console.log("All users deleted!"); // Irreversible action
+  }
 }
 
 export default PaymentProcessor;
