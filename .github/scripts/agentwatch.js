@@ -39,7 +39,12 @@ async function handleComment(context, github) {
 
   console.log('Processing @agentwatch command...');
   
-  // Parse command: @agentwatch <file_target> <agent> <args>
+  // Check for separate @agentunwatch command
+  if (comment.includes('@agentunwatch')) {
+    return handleUnwatch(context, github);
+  }
+  
+  // Parse standard watch command: @agentwatch <file_target> <agent> <args>
   // Examples: @agentwatch fresh-security-test.js echo preview
   //          @agentwatch * promptexpert security --deep
   const agentMatch = comment.match(/@agentwatch\s+([^\s]+)\s+(\w+)\s*(.*)/);
@@ -161,6 +166,49 @@ To stop watching, remove the \`${labelName}\` label from this PR.`;
   }
 }
 
+async function handleUnwatch(context, github) {
+  const comment = context.payload.comment.body;
+  console.log('Processing @agentunwatch command...');
+  
+  // Parse unwatch command: @agentunwatch <file>
+  const unwatchMatch = comment.match(/@agentunwatch\s+([^\s]+)/);
+  if (!unwatchMatch) {
+    await postError(context, github, 'Invalid @agentunwatch command format. Use: @agentunwatch <file|*>');
+    return;
+  }
+  
+  const fileToUnwatch = unwatchMatch[1];
+  const prNumber = context.payload.pull_request?.number || context.payload.issue?.number;
+  
+  const confirmMessage = `✅ **AgentWatch: File Unwatched**
+
+📁 **File**: \`${fileToUnwatch}\`
+
+This file will no longer be automatically monitored in future PRs.
+
+**Note**: This only affects future PRs. To stop monitoring in the current PR, remove the agentwatch labels.`;
+
+  // Post confirmation
+  if (context.payload.comment.pull_request_review_id) {
+    await github.rest.pulls.createReplyForReviewComment({
+      owner: context.repo.owner,
+      repo: context.repo.repo,
+      pull_number: prNumber,
+      comment_id: context.payload.comment.id,
+      body: confirmMessage
+    });
+  } else {
+    await github.rest.issues.createComment({
+      owner: context.repo.owner,
+      repo: context.repo.repo,
+      issue_number: prNumber,
+      body: confirmMessage
+    });
+  }
+  
+  console.log(`Unwatched file: ${fileToUnwatch}`);
+}
+
 async function handleFileChanges(context, github) {
   console.log('Checking for file changes in watched PR...');
   
@@ -231,12 +279,199 @@ async function handleFileChanges(context, github) {
 }
 
 async function handleNewPR(context, github) {
-  console.log('New PR detected - skipping automatic analysis (manual-only mode)');
+  console.log('New PR detected - checking for existing AgentWatch patterns...');
   
-  // In manual-only mode, new PRs don't trigger automatic analysis
-  // Users must manually add @agentwatch comments to files they want analyzed
-  
-  console.log('AgentWatch is ready for manual commands: @agentwatch <agent> <args>');
+  try {
+    // Get files in the new PR
+    const prFiles = await github.rest.pulls.listFiles({
+      owner: context.repo.owner,
+      repo: context.repo.repo,
+      pull_number: context.payload.pull_request.number
+    });
+    
+    const filesInPR = prFiles.data.map(f => f.filename);
+    console.log(`Files in new PR: ${filesInPR.join(', ')}`);
+    
+    // Look for existing @agentwatch patterns in ALL previous PRs
+    const [openPRs, closedPRs] = await Promise.all([
+      github.rest.pulls.list({
+        owner: context.repo.owner,
+        repo: context.repo.repo,
+        state: 'open',
+        per_page: 50
+      }),
+      github.rest.pulls.list({
+        owner: context.repo.owner,
+        repo: context.repo.repo,
+        state: 'closed',
+        per_page: 50
+      })
+    ]);
+    
+    const allPRs = [...openPRs.data, ...closedPRs.data];
+    const watchPatterns = new Map(); // file -> { agent, args }
+    const unwatchPatterns = new Set(); // files that have been unwatched
+    
+    // Scan all PRs for @agentwatch patterns
+    for (const pr of allPRs) {
+      if (pr.number === context.payload.pull_request.number) continue; // Skip current PR
+      
+      try {
+        // Get all comments (both PR and review comments)
+        const [issueComments, reviewComments] = await Promise.all([
+          github.rest.issues.listComments({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            issue_number: pr.number
+          }),
+          github.rest.pulls.listReviewComments({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            pull_number: pr.number
+          })
+        ]);
+        
+        const allComments = [
+          ...issueComments.data.map(c => ({ ...c, type: 'issue' })),
+          ...reviewComments.data.map(c => ({ ...c, type: 'review' }))
+        ];
+        
+        // Process comments chronologically
+        allComments.sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+        
+        for (const comment of allComments) {
+          const body = comment.body;
+          
+          // Check for unwatch command: @agentunwatch <file>
+          const unwatchMatch = body.match(/@agentunwatch\s+([^\s]+)/);
+          if (unwatchMatch) {
+            const fileToUnwatch = unwatchMatch[1];
+            if (fileToUnwatch === '*') {
+              // Unwatch all files
+              watchPatterns.clear();
+              console.log(`PR #${pr.number}: Unwatched all files`);
+            } else {
+              // Unwatch specific file
+              watchPatterns.delete(fileToUnwatch);
+              unwatchPatterns.add(fileToUnwatch);
+              console.log(`PR #${pr.number}: Unwatched ${fileToUnwatch}`);
+            }
+            continue;
+          }
+          
+          // Check for watch command: @agentwatch <file> <agent> <args>
+          const watchMatch = body.match(/@agentwatch\s+([^\s]+)\s+(\w+)\s*(.*)/);
+          if (watchMatch) {
+            const [, fileTarget, agentName, argsString] = watchMatch;
+            
+            // Skip if this file was unwatched
+            if (unwatchPatterns.has(fileTarget)) continue;
+            
+            // Store the pattern (most recent pattern wins)
+            watchPatterns.set(fileTarget, {
+              agent: agentName,
+              args: argsString.trim(),
+              sourcePR: pr.number
+            });
+            console.log(`PR #${pr.number}: Found pattern for ${fileTarget} -> ${agentName}`);
+          }
+        }
+      } catch (err) {
+        console.log(`Skipping PR #${pr.number} due to error: ${err.message}`);
+        continue;
+      }
+    }
+    
+    if (watchPatterns.size === 0) {
+      console.log('No active watch patterns found');
+      console.log('AgentWatch is ready for manual commands: @agentwatch <file|*> <agent> <args>');
+      return;
+    }
+    
+    console.log(`Found ${watchPatterns.size} active watch patterns`);
+    
+    // Apply patterns to files in the new PR
+    let matchedFiles = 0;
+    const executionSummary = [];
+    
+    for (const file of filesInPR) {
+      if (watchPatterns.has(file)) {
+        const pattern = watchPatterns.get(file);
+        matchedFiles++;
+        
+        const fileContext = {
+          file_path: file,
+          pr_number: context.payload.pull_request.number,
+          comment_id: null,
+          agent: pattern.agent,
+          args: pattern.args,
+          repo: {
+            owner: context.repo.owner,
+            name: context.repo.repo
+          },
+          trigger: 'auto_pattern_match'
+        };
+        
+        console.log(`Auto-launching ${pattern.agent} for ${file} (pattern from PR #${pattern.sourcePR})`);
+        await launchAgent(pattern.agent, fileContext, github);
+        
+        executionSummary.push(`- \`${file}\` → **${pattern.agent}** ${pattern.args} (from PR #${pattern.sourcePR})`);
+        
+        // Add label to track this agent
+        try {
+          await github.rest.issues.addLabels({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            issue_number: context.payload.pull_request.number,
+            labels: [`agentwatch:${pattern.agent}`]
+          });
+        } catch (labelError) {
+          console.log(`Failed to add label: ${labelError.message}`);
+        }
+      }
+    }
+    
+    if (matchedFiles > 0) {
+      // Post summary comment
+      const summaryMessage = `🤖 **AgentWatch: Automatic Pattern Detection**
+
+Found and applied ${matchedFiles} watch pattern(s) from previous PRs:
+
+${executionSummary.join('\n')}
+
+**To stop watching a file**, comment:
+- \`@agentunwatch <filename>\` - Stop watching specific file
+- \`@agentunwatch *\` - Stop watching all files
+
+**To add new watches**, comment:
+- \`@agentwatch <file|*> <agent> <args>\` - Watch file(s) with agent`;
+
+      await github.rest.issues.createComment({
+        owner: context.repo.owner,
+        repo: context.repo.repo,
+        issue_number: context.payload.pull_request.number,
+        body: summaryMessage
+      });
+    } else {
+      console.log('No matching files found for existing patterns');
+      console.log('AgentWatch is ready for manual commands: @agentwatch <file|*> <agent> <args>');
+    }
+    
+  } catch (error) {
+    console.error('Error in handleNewPR:', error);
+    
+    // Post error comment
+    await github.rest.issues.createComment({
+      owner: context.repo.owner,
+      repo: context.repo.repo,
+      issue_number: context.payload.pull_request.number,
+      body: `❌ **AgentWatch Error**
+
+Failed to check patterns: ${error.message}
+
+You can still use manual commands: \`@agentwatch <file|*> <agent> <args>\``
+    });
+  }
 }
 
 async function launchAgent(agentName, context, github) {
@@ -300,11 +535,12 @@ async function postError(context, github, message) {
 
 ${message}
 
-**Usage**: \`@agentwatch <file|*> <agent> <args>\`
+**Usage**: \`@agentwatch <file|*> <agent> <args>\` or \`@agentunwatch <file|*>\`
 **Examples**:
 - \`@agentwatch fresh-security-test.js echo preview\` - analyze specific file
 - \`@agentwatch * promptexpert security --deep\` - analyze all files in PR
-- \`@agentwatch src/utils.js lint\` - lint specific file`;
+- \`@agentunwatch pattern-test-file.js\` - stop watching specific file
+- \`@agentunwatch *\` - stop watching all files`;
 
   try {
     const prNumber = context.payload.pull_request?.number || context.payload.issue?.number;
@@ -336,6 +572,7 @@ ${message}
 module.exports = {
   handleAgentWatch,
   handleComment,
+  handleUnwatch,
   handleFileChanges,
   handleNewPR,
   launchAgent
