@@ -32,29 +32,29 @@ async function handleAgentWatch(context, github) {
 async function handleComment(context, github) {
   const comment = context.payload.comment.body;
   
-  if (!comment.includes('@agentwatch')) {
-    console.log('No @agentwatch mention found in comment');
+  if (!comment.includes('@agent-')) {
+    console.log('No @agent- command found in comment');
     return;
   }
 
-  console.log('Processing @agentwatch command...');
+  console.log('Processing @agent- command...');
   
-  // Check for separate @agentunwatch command
-  if (comment.includes('@agentunwatch')) {
+  // Check for @agent-unwatch command
+  if (comment.includes('@agent-unwatch')) {
     return handleUnwatch(context, github);
   }
   
-  // Check for @agentwatchlist command
-  if (comment.includes('@agentwatchlist')) {
+  // Check for @agent-list command
+  if (comment.includes('@agent-list')) {
     return handleWatchList(context, github);
   }
   
-  // Parse standard watch command: @agentwatch <file_target> <agent> <args>
-  // Examples: @agentwatch fresh-security-test.js echo preview
-  //          @agentwatch * promptexpert security --deep
-  const agentMatch = comment.match(/@agentwatch\s+([^\s]+)\s+(\w+)\s*(.*)/);
+  // Parse standard watch command: @agent-watch <file_target> <agent> <args>
+  // Examples: @agent-watch fresh-security-test.js echo preview
+  //          @agent-watch * promptexpert security --deep
+  const agentMatch = comment.match(/@agent-watch\s+([^\s]+)\s+(\w+)\s*(.*)/);
   if (!agentMatch) {
-    await postError(context, github, 'Invalid @agentwatch command format. Use: @agentwatch <file|*> <agent> <args>');
+    await postError(context, github, 'Invalid @agent-watch command format. Use: @agent-watch <file|*> <agent> <args>');
     return;
   }
   
@@ -131,7 +131,8 @@ The agent is now monitoring these files and will run:
 - ✅ **Immediately** (running now)
 - 🔄 **On changes** (future pushes)
 
-To stop watching, remove the \`${labelName}\` label from this PR.`;
+To stop watching in this PR, remove the \`${labelName}\` label.
+To stop watching in future PRs, use \`@agent-unwatch ${targetFiles.length === 1 ? targetFiles[0] : '*'}\`.
 
     // Post response as PR comment or reply depending on context
     if (context.payload.comment.pull_request_review_id) {
@@ -162,7 +163,7 @@ To stop watching, remove the \`${labelName}\` label from this PR.`;
 }
 
 async function handleWatchList(context, github) {
-  console.log('Processing @agentwatchlist command...');
+  console.log('Processing @agent-list command...');
   const prNumber = context.payload.pull_request?.number || context.payload.issue?.number;
   
   try {
@@ -215,7 +216,7 @@ async function handleWatchList(context, github) {
           const body = comment.body;
           
           // Check for unwatch command
-          const unwatchMatch = body.match(/@agentunwatch\s+([^\s]+)/);
+          const unwatchMatch = body.match(/@agent-unwatch\s+([^\s]+)/);
           if (unwatchMatch) {
             const fileToUnwatch = unwatchMatch[1];
             if (fileToUnwatch === '*') {
@@ -228,7 +229,7 @@ async function handleWatchList(context, github) {
           }
           
           // Check for watch command
-          const watchMatch = body.match(/@agentwatch\s+([^\s]+)\s+(\w+)\s*(.*)/);
+          const watchMatch = body.match(/@agent-watch\s+([^\s]+)\s+(\w+)\s*(.*)/);
           if (watchMatch) {
             const [, fileTarget, agentName, argsString] = watchMatch;
             
@@ -257,7 +258,7 @@ async function handleWatchList(context, github) {
     if (watchPatterns.size === 0) {
       listMessage += '🔍 No files are currently being watched.\n\n';
       listMessage += 'To start watching files, use:\n';
-      listMessage += '`@agentwatch <file|*> <agent> <args>`';
+      listMessage += '`@agent-watch <file|*> <agent> <args>`';
     } else {
       listMessage += `Currently watching **${watchPatterns.size} file(s)**:\n\n`;
       listMessage += '| File | Agent | Args | Source | Set By | When |\n';
@@ -272,9 +273,9 @@ async function handleWatchList(context, github) {
       }
       
       listMessage += '\n**Commands:**\n';
-      listMessage += '- `@agentunwatch <file>` - Stop watching a specific file\n';
-      listMessage += '- `@agentunwatch *` - Stop watching all files\n';
-      listMessage += '- `@agentwatch <file|*> <agent> <args>` - Start watching file(s)';
+      listMessage += '- `@agent-unwatch <file>` - Stop watching a specific file\n';
+      listMessage += '- `@agent-unwatch *` - Stop watching all files\n';
+      listMessage += '- `@agent-watch <file|*> <agent> <args>` - Start watching file(s)';
     }
     
     // Post the list
@@ -305,25 +306,34 @@ async function handleWatchList(context, github) {
 
 async function handleUnwatch(context, github) {
   const comment = context.payload.comment.body;
-  console.log('Processing @agentunwatch command...');
+  console.log('Processing @agent-unwatch command...');
   
-  // Parse unwatch command: @agentunwatch <file>
-  const unwatchMatch = comment.match(/@agentunwatch\s+([^\s]+)/);
+  // Parse unwatch command: @agent-unwatch <file>
+  const unwatchMatch = comment.match(/@agent-unwatch\s+([^\s]+)/);
   if (!unwatchMatch) {
-    await postError(context, github, 'Invalid @agentunwatch command format. Use: @agentunwatch <file|*>');
+    await postError(context, github, 'Invalid @agent-unwatch command format. Use: @agent-unwatch <file|*>');
     return;
   }
   
   const fileToUnwatch = unwatchMatch[1];
   const prNumber = context.payload.pull_request?.number || context.payload.issue?.number;
   
-  const confirmMessage = `✅ **AgentWatch: File Unwatched**
+  let confirmMessage;
+  if (fileToUnwatch === '*') {
+    confirmMessage = `✅ **AgentWatch: All Files Unwatched**
+
+🚫 **Cleared all watch patterns** - No files will be automatically monitored in future PRs.
+
+**Note**: This only affects future PRs. To stop monitoring in the current PR, remove the agentwatch labels.`;
+  } else {
+    confirmMessage = `✅ **AgentWatch: File Unwatched**
 
 📁 **File**: \`${fileToUnwatch}\`
 
 This file will no longer be automatically monitored in future PRs.
 
 **Note**: This only affects future PRs. To stop monitoring in the current PR, remove the agentwatch labels.`;
+  }
 
   // Post confirmation
   if (context.payload.comment.pull_request_review_id) {
@@ -378,9 +388,9 @@ async function handleFileChanges(context, github) {
       pull_number: context.payload.pull_request.number
     });
     
-    // Only monitor files that have @agentwatch comments IN THIS PR
+    // Only monitor files that have @agent-watch comments IN THIS PR
     const watchComments = comments.data.filter(c => 
-      c.body.includes('@agentwatch') && 
+      c.body.includes('@agent-watch') && 
       changedFiles.includes(c.path)
     );
     
@@ -388,7 +398,7 @@ async function handleFileChanges(context, github) {
     
     // Launch agents for watched files that changed
     for (const comment of watchComments) {
-      const agentMatch = comment.body.match(/@agentwatch\s+([^\s]+)\s+(\w+)\s*(.*)/);
+      const agentMatch = comment.body.match(/@agent-watch\s+([^\s]+)\s+(\w+)\s*(.*)/);
       if (!agentMatch) continue;
       
       const [, fileTarget, agentName, argsString] = agentMatch;
@@ -482,8 +492,8 @@ async function handleNewPR(context, github) {
         for (const comment of allComments) {
           const body = comment.body;
           
-          // Check for unwatch command: @agentunwatch <file>
-          const unwatchMatch = body.match(/@agentunwatch\s+([^\s]+)/);
+          // Check for unwatch command: @agent-unwatch <file>
+          const unwatchMatch = body.match(/@agent-unwatch\s+([^\s]+)/);
           if (unwatchMatch) {
             const fileToUnwatch = unwatchMatch[1];
             if (fileToUnwatch === '*') {
@@ -499,8 +509,8 @@ async function handleNewPR(context, github) {
             continue;
           }
           
-          // Check for watch command: @agentwatch <file> <agent> <args>
-          const watchMatch = body.match(/@agentwatch\s+([^\s]+)\s+(\w+)\s*(.*)/);
+          // Check for watch command: @agent-watch <file> <agent> <args>
+          const watchMatch = body.match(/@agent-watch\s+([^\s]+)\s+(\w+)\s*(.*)/);
           if (watchMatch) {
             const [, fileTarget, agentName, argsString] = watchMatch;
             
@@ -524,7 +534,7 @@ async function handleNewPR(context, github) {
     
     if (watchPatterns.size === 0) {
       console.log('No active watch patterns found');
-      console.log('AgentWatch is ready for manual commands: @agentwatch <file|*> <agent> <args>');
+      console.log('AgentWatch is ready for manual commands: @agent-watch <file|*> <agent> <args>');
       return;
     }
     
@@ -570,11 +580,11 @@ Found and applied ${matchedFiles} watch pattern(s) from previous PRs:
 ${executionSummary.join('\n')}
 
 **To stop watching a file**, comment:
-- \`@agentunwatch <filename>\` - Stop watching specific file
-- \`@agentunwatch *\` - Stop watching all files
+- \`@agent-unwatch <filename>\` - Stop watching specific file
+- \`@agent-unwatch *\` - Stop watching all files
 
 **To add new watches**, comment:
-- \`@agentwatch <file|*> <agent> <args>\` - Watch file(s) with agent`;
+- \`@agent-watch <file|*> <agent> <args>\` - Watch file(s) with agent`;
 
       await github.rest.issues.createComment({
         owner: context.repo.owner,
@@ -584,7 +594,7 @@ ${executionSummary.join('\n')}
       });
     } else {
       console.log('No matching files found for existing patterns');
-      console.log('AgentWatch is ready for manual commands: @agentwatch <file|*> <agent> <args>');
+      console.log('AgentWatch is ready for manual commands: @agent-watch <file|*> <agent> <args>');
     }
     
   } catch (error) {
@@ -599,7 +609,7 @@ ${executionSummary.join('\n')}
 
 Failed to check patterns: ${error.message}
 
-You can still use manual commands: \`@agentwatch <file|*> <agent> <args>\``
+You can still use manual commands: \`@agent-watch <file|*> <agent> <args>\``
     });
   }
 }
@@ -714,13 +724,13 @@ async function postError(context, github, message) {
 
 ${message}
 
-**Usage**: \`@agentwatch <file|*> <agent> <args>\` or \`@agentunwatch <file|*>\` or \`@agentwatchlist\`
+**Usage**: \`@agent-watch <file|*> <agent> <args>\` or \`@agent-unwatch <file|*>\` or \`@agent-list\`
 **Examples**:
-- \`@agentwatch fresh-security-test.js echo preview\` - analyze specific file
-- \`@agentwatch * promptexpert security --deep\` - analyze all files in PR
-- \`@agentunwatch pattern-test-file.js\` - stop watching specific file
-- \`@agentunwatch *\` - stop watching all files
-- \`@agentwatchlist\` - list all currently watched files`;
+- \`@agent-watch fresh-security-test.js echo preview\` - analyze specific file
+- \`@agent-watch * promptexpert security --deep\` - analyze all files in PR
+- \`@agent-unwatch pattern-test-file.js\` - stop watching specific file
+- \`@agent-unwatch *\` - stop watching all files
+- \`@agent-list\` - list all currently watched files`;
 
   try {
     const prNumber = context.payload.pull_request?.number || context.payload.issue?.number;

@@ -1,6 +1,10 @@
 name: AgentWatch
 # File-targeted agent monitoring system
-# Usage: @agentwatch <file|*> <agent> <args> in PR or file comments
+# Usage: @agent-watch <file|*> <agent> <args> in PR or file comments
+# Commands:
+#   @agent-watch <file|*> <agent> <args> - Start watching file(s)
+#   @agent-unwatch <file|*> - Stop watching file(s) (* = all files)
+#   @agent-list - Show all currently watched files
 
 on:
   pull_request_review_comment:
