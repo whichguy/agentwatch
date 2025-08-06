@@ -1,0 +1,107 @@
+name: Echo Agent (Reusable Workflow)
+
+on:
+  workflow_call:
+    inputs:
+      file_path:
+        description: 'File to process'
+        required: true
+        type: string
+      pr_number:
+        description: 'Pull request number'
+        required: true
+        type: number
+      agent_args:
+        description: 'Arguments passed to the agent'
+        required: false
+        type: string
+        default: ''
+      repository:
+        description: 'Repository to operate on'
+        required: true
+        type: string
+      trigger_type:
+        description: 'How the agent was triggered'
+        required: false
+        type: string
+        default: 'manual'
+
+jobs:
+  echo:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.repository }}
+      
+      - name: Parse arguments
+        id: parse
+        run: |
+          echo "Processing file: ${{ inputs.file_path }}"
+          echo "Arguments: ${{ inputs.agent_args }}"
+          echo "PR Number: ${{ inputs.pr_number }}"
+          
+          # Parse agent_args
+          ARGS="${{ inputs.agent_args }}"
+          echo "args=$ARGS" >> $GITHUB_OUTPUT
+      
+      - name: Process file
+        id: process
+        run: |
+          FILE="${{ inputs.file_path }}"
+          
+          # Simple echo processing
+          if [ -f "$FILE" ]; then
+            echo "File exists: $FILE"
+            echo "File size: $(wc -c < "$FILE") bytes"
+            echo "Line count: $(wc -l < "$FILE") lines"
+            
+            # Create result
+            {
+              echo 'result<<EOF'
+              echo "📄 **File Analysis: $FILE**"
+              echo ""
+              echo "- Size: $(wc -c < "$FILE") bytes"
+              echo "- Lines: $(wc -l < "$FILE")"
+              echo "- Type: ${FILE##*.}"
+              echo ""
+              echo "**Agent Args**: ${{ inputs.agent_args }}"
+              echo ""
+              echo "**Trigger**: ${{ inputs.trigger_type }}"
+              echo 'EOF'
+            } >> $GITHUB_OUTPUT
+          else
+            echo "result=File not found: $FILE" >> $GITHUB_OUTPUT
+          fi
+      
+      - name: Post results to PR
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const result = `${{ steps.process.outputs.result }}`;
+            
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: ${{ inputs.pr_number }},
+              body: `🤖 **Echo Agent Results**\n\n${result}\n\n---\n*Executed via reusable workflow*`
+            });
+            
+            // Add label
+            try {
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: ${{ inputs.pr_number }},
+                labels: ['agent:seen:echo']
+              });
+            } catch (e) {
+              console.log('Could not add label:', e.message);
+            }

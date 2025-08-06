@@ -1,0 +1,155 @@
+name: AgentWatch v2 (Workflow-Based)
+# Orchestrates reusable workflows as agents
+
+on:
+  pull_request_review_comment:
+    types: [created]
+  issue_comment:
+    types: [created]
+  pull_request:
+    types: [opened, synchronize]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: 'PR number to process'
+        required: true
+        type: number
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+  actions: write
+
+jobs:
+  orchestrate:
+    runs-on: ubuntu-latest
+    outputs:
+      should_run_echo: ${{ steps.detect.outputs.should_run_echo }}
+      should_run_security: ${{ steps.detect.outputs.should_run_security }}
+      files_to_process: ${{ steps.detect.outputs.files_to_process }}
+      pr_number: ${{ steps.detect.outputs.pr_number }}
+      
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Detect patterns and commands
+        id: detect
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            
+            console.log('AgentWatch v2 triggered by:', context.eventName);
+            
+            // Get PR number
+            let prNumber = context.payload.pull_request?.number || 
+                          context.payload.issue?.number ||
+                          context.payload.inputs?.pr_number;
+            
+            if (!prNumber) {
+              console.log('No PR number found');
+              return;
+            }
+            
+            core.setOutput('pr_number', prNumber);
+            
+            // Check for commands in comments
+            if (context.eventName === 'issue_comment' || 
+                context.eventName === 'pull_request_review_comment') {
+              
+              const comment = context.payload.comment.body;
+              
+              // Parse @agent-watch command
+              if (comment.includes('@agent-watch')) {
+                const match = comment.match(/@agent-watch\s+([^\s]+)\s+(\w+)(?:\s+@\s+(.*))?/);
+                if (match) {
+                  const [, pattern, agent, args] = match;
+                  
+                  console.log(`Pattern: ${pattern}, Agent: ${agent}, Args: ${args || 'none'}`);
+                  
+                  // Get files in PR
+                  const { data: files } = await github.rest.pulls.listFiles({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    pull_number: prNumber
+                  });
+                  
+                  // For now, simple pattern matching
+                  const matchingFiles = files
+                    .map(f => f.filename)
+                    .filter(f => {
+                      if (pattern === '*') return true;
+                      if (pattern.includes('*')) {
+                        const regex = pattern.replace(/\*/g, '.*');
+                        return new RegExp(regex).test(f);
+                      }
+                      return f === pattern;
+                    });
+                  
+                  if (matchingFiles.length > 0) {
+                    core.setOutput(`should_run_${agent}`, 'true');
+                    core.setOutput('files_to_process', JSON.stringify(matchingFiles));
+                    
+                    // Store pattern for persistence
+                    await github.rest.issues.createComment({
+                      owner: context.repo.owner,
+                      repo: context.repo.repo,
+                      issue_number: prNumber,
+                      body: `✅ Pattern registered: \`${pattern}\` → **${agent}** agent`
+                    });
+                  }
+                }
+              }
+            }
+            
+            // Check for auto-detection on new PRs
+            if (context.eventName === 'pull_request' && 
+                context.payload.action === 'opened') {
+              
+              console.log('Checking for existing patterns...');
+              
+              // This is simplified - in production, scan previous PRs for patterns
+              // For now, just demonstrate the concept
+              const { data: files } = await github.rest.pulls.listFiles({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: prNumber
+              });
+              
+              // Example: if any .js files, run echo agent
+              const jsFiles = files
+                .map(f => f.filename)
+                .filter(f => f.endsWith('.js'));
+              
+              if (jsFiles.length > 0) {
+                console.log('Found JS files, will run echo agent');
+                core.setOutput('should_run_echo', 'true');
+                core.setOutput('files_to_process', JSON.stringify(jsFiles));
+              }
+            }
+  
+  # Call echo agent workflow
+  echo-agent:
+    needs: orchestrate
+    if: needs.orchestrate.outputs.should_run_echo == 'true'
+    uses: ./.github/workflows/agent-echo.yml
+    with:
+      file_path: ${{ fromJson(needs.orchestrate.outputs.files_to_process)[0] }}
+      pr_number: ${{ needs.orchestrate.outputs.pr_number }}
+      agent_args: 'workflow-based execution'
+      repository: ${{ github.repository }}
+      trigger_type: 'auto'
+    secrets: inherit
+  
+  # Future: Add more agent workflows
+  # security-agent:
+  #   needs: orchestrate
+  #   if: needs.orchestrate.outputs.should_run_security == 'true'
+  #   uses: agentwatch/agents/.github/workflows/security.yml@main
+  #   with:
+  #     file_path: ${{ needs.orchestrate.outputs.file_path }}
+  #     pr_number: ${{ needs.orchestrate.outputs.pr_number }}
+  #     agent_args: ${{ needs.orchestrate.outputs.agent_args }}
+  #     repository: ${{ github.repository }}
