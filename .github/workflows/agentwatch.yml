@@ -1,9 +1,11 @@
 name: AgentWatch
-# Simple file-level agent tagging and monitoring system
-# Tag files with: @agentwatch <agent> <args> in review comments
+# File-targeted agent monitoring system
+# Usage: @agentwatch <agent> <file|*> <args> in PR or file comments
 
 on:
   pull_request_review_comment:
+    types: [created]
+  issue_comment:
     types: [created]
   pull_request:
     types: [opened, synchronize]

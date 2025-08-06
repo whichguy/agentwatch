@@ -12,7 +12,14 @@ async function handleAgentWatch(context, github) {
   console.log(`AgentWatch triggered by: ${context.eventName}`);
   
   if (context.eventName === 'pull_request_review_comment') {
-    await handleFileTag(context, github);
+    await handleComment(context, github);
+  } else if (context.eventName === 'issue_comment') {
+    // Handle PR-level comments (GitHub treats PR comments as issue comments)
+    if (context.payload.issue.pull_request) {
+      await handleComment(context, github);
+    } else {
+      console.log('Ignoring issue comment - AgentWatch only monitors pull requests');
+    }
   } else if (context.eventName === 'pull_request') {
     if (context.payload.action === 'opened') {
       await handleNewPR(context, github);
@@ -22,7 +29,7 @@ async function handleAgentWatch(context, github) {
   }
 }
 
-async function handleFileTag(context, github) {
+async function handleComment(context, github) {
   const comment = context.payload.comment.body;
   
   if (!comment.includes('@agentwatch')) {
@@ -30,31 +37,52 @@ async function handleFileTag(context, github) {
     return;
   }
 
-  console.log('Processing @agentwatch file tag...');
+  console.log('Processing @agentwatch command...');
   
-  // Parse command: @agentwatch promptexpert security --deep
-  const agentMatch = comment.match(/@agentwatch\s+(\w+)\s*(.*)/);
+  // Parse command: @agentwatch <agent> <file_target> <args>
+  // Examples: @agentwatch echo fresh-security-test.js preview
+  //          @agentwatch promptexpert * security --deep
+  const agentMatch = comment.match(/@agentwatch\s+(\w+)\s+([^\s]+)\s*(.*)/);
   if (!agentMatch) {
-    await postError(context, github, 'Invalid @agentwatch command format. Use: @agentwatch <agent> <args>');
+    await postError(context, github, 'Invalid @agentwatch command format. Use: @agentwatch <agent> <file|*> <args>');
     return;
   }
   
-  const [, agentName, argsString] = agentMatch;
+  const [, agentName, fileTarget, argsString] = agentMatch;
   
-  const fileContext = {
-    file_path: context.payload.comment.path,
-    line: context.payload.comment.line,
-    pr_number: context.payload.pull_request.number,
-    comment_id: context.payload.comment.id,
-    agent: agentName,
-    args: argsString.trim(),
-    repo: {
-      owner: context.repo.owner,
-      name: context.repo.repo
+  // Get PR number from either pull request or issue context
+  const prNumber = context.payload.pull_request?.number || context.payload.issue?.number;
+  
+  // Get files in the PR to validate file targets
+  const files = await github.rest.pulls.listFiles({
+    owner: context.repo.owner,
+    repo: context.repo.repo,
+    pull_number: prNumber
+  });
+  
+  const availableFiles = files.data.map(f => f.filename);
+  console.log(`Available files in PR: ${availableFiles.join(', ')}`);
+  
+  // Determine target files based on fileTarget parameter
+  let targetFiles = [];
+  if (fileTarget === '*') {
+    targetFiles = availableFiles;
+    console.log('Targeting ALL files in PR');
+  } else {
+    // Check if specified file exists in PR
+    if (availableFiles.includes(fileTarget)) {
+      targetFiles = [fileTarget];
+      console.log(`Targeting specific file: ${fileTarget}`);
+    } else {
+      await postError(context, github, `File "${fileTarget}" not found in PR. Available files: ${availableFiles.join(', ')}`);
+      return;
     }
-  };
+  }
   
-  console.log('File context:', JSON.stringify(fileContext, null, 2));
+  if (targetFiles.length === 0) {
+    await postError(context, github, 'No files to analyze in this PR');
+    return;
+  }
   
   try {
     // 1. Add label to PR
@@ -62,40 +90,74 @@ async function handleFileTag(context, github) {
     await github.rest.issues.addLabels({
       owner: context.repo.owner,
       repo: context.repo.repo,
-      issue_number: context.payload.pull_request.number,
+      issue_number: prNumber,
       labels: [labelName]
     });
     console.log(`Added label: ${labelName}`);
     
-    // 2. Launch agent immediately
-    await launchAgent(agentName, fileContext, github);
+    // 2. Launch agent for each target file
+    const results = [];
+    for (const targetFile of targetFiles) {
+      const fileContext = {
+        file_path: targetFile,
+        pr_number: prNumber,
+        comment_id: context.payload.comment.id,
+        agent: agentName,
+        args: argsString.trim(),
+        repo: {
+          owner: context.repo.owner,
+          name: context.repo.repo
+        },
+        trigger: 'manual_command'
+      };
+      
+      console.log(`Launching ${agentName} for file: ${targetFile}`);
+      await launchAgent(agentName, fileContext, github);
+      results.push(targetFile);
+    }
     
-    // 3. Confirm tagging
-    const confirmMessage = `✅ **AgentWatch: File Tagged**
+    // 3. Confirm command execution
+    const fileList = targetFiles.length === 1 ? 
+      `\`${targetFiles[0]}\`` : 
+      `${targetFiles.length} files: ${targetFiles.map(f => `\`${f}\``).join(', ')}`;
+    
+    const confirmMessage = `✅ **AgentWatch: Command Executed**
 
-📁 **File**: \`${fileContext.file_path}\`
+📁 **Files**: ${fileList}
 🤖 **Agent**: **${agentName}**
-⚙️ **Args**: \`${fileContext.args || 'none'}\`
+⚙️ **Args**: \`${argsString.trim() || 'none'}\`
 
-This file is now being watched. The agent will run:
+The agent is now monitoring these files and will run:
 - ✅ **Immediately** (running now)
 - 🔄 **On changes** (future pushes)
 
 To stop watching, remove the \`${labelName}\` label from this PR.`;
 
-    await github.rest.pulls.createReplyForReviewComment({
-      owner: context.repo.owner,
-      repo: context.repo.repo,
-      pull_number: context.payload.pull_request.number,
-      comment_id: context.payload.comment.id,
-      body: confirmMessage
-    });
+    // Post response as PR comment or reply depending on context
+    if (context.payload.comment.pull_request_review_id) {
+      // File-level review comment - reply to it
+      await github.rest.pulls.createReplyForReviewComment({
+        owner: context.repo.owner,
+        repo: context.repo.repo,
+        pull_number: prNumber,
+        comment_id: context.payload.comment.id,
+        body: confirmMessage
+      });
+    } else {
+      // PR-level comment - post new PR comment
+      await github.rest.issues.createComment({
+        owner: context.repo.owner,
+        repo: context.repo.repo,
+        issue_number: prNumber,
+        body: confirmMessage
+      });
+    }
     
-    console.log('File tagging completed successfully');
+    console.log(`AgentWatch command completed successfully for ${results.length} files`);
     
   } catch (error) {
-    console.error('Error in handleFileTag:', error);
-    await postError(context, github, `Failed to tag file: ${error.message}`);
+    console.error('Error in handleComment:', error);
+    await postError(context, github, `Failed to execute AgentWatch command: ${error.message}`);
   }
 }
 
@@ -238,19 +300,33 @@ async function postError(context, github, message) {
 
 ${message}
 
-**Usage**: \`@agentwatch <agent> <args>\`
+**Usage**: \`@agentwatch <agent> <file|*> <args>\`
 **Examples**:
-- \`@agentwatch echo hello world\`
-- \`@agentwatch promptexpert security --deep\``;
+- \`@agentwatch echo fresh-security-test.js preview\` - analyze specific file
+- \`@agentwatch promptexpert * security --deep\` - analyze all files in PR
+- \`@agentwatch lint src/utils.js\` - lint specific file`;
 
   try {
-    await github.rest.pulls.createReplyForReviewComment({
-      owner: context.repo.owner,
-      repo: context.repo.repo,
-      pull_number: context.payload.pull_request.number,
-      comment_id: context.payload.comment.id,
-      body: errorMessage
-    });
+    const prNumber = context.payload.pull_request?.number || context.payload.issue?.number;
+    
+    if (context.payload.comment.pull_request_review_id) {
+      // File-level review comment - reply to it
+      await github.rest.pulls.createReplyForReviewComment({
+        owner: context.repo.owner,
+        repo: context.repo.repo,
+        pull_number: prNumber,
+        comment_id: context.payload.comment.id,
+        body: errorMessage
+      });
+    } else {
+      // PR-level comment - post new PR comment
+      await github.rest.issues.createComment({
+        owner: context.repo.owner,
+        repo: context.repo.repo,
+        issue_number: prNumber,
+        body: errorMessage
+      });
+    }
   } catch (error) {
     console.error('Failed to post error message:', error);
   }
@@ -259,7 +335,7 @@ ${message}
 // Export for GitHub Actions
 module.exports = {
   handleAgentWatch,
-  handleFileTag,
+  handleComment,
   handleFileChanges,
   handleNewPR,
   launchAgent
