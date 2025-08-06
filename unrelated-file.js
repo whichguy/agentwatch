@@ -20,6 +20,11 @@ class DataProcessor {
   log(message) {
     console.log(`DataProcessor: ${message}`);
   }
+  
+  // CONTROL TEST: This file should NOT trigger AgentWatch
+  testMethod() {
+    return "This is a control test - should not trigger any agents";
+  }
 }
 
 export default DataProcessor;
