@@ -1,4 +1,5 @@
 // Enhanced security test file for AgentWatch file-targeting system
+// Updated with additional authentication bypass vulnerability
 class UserManager {
   constructor() {
     this.users = new Map();
@@ -16,6 +17,11 @@ class UserManager {
   validateUser(username, password) {
     if (username === "admin" && password === "password") {
       return { valid: true, role: "admin", token: this.generateToken() };
+    }
+    
+    // NEW: Authentication bypass vulnerability
+    if (username === "guest" || password === "") {
+      return { valid: true, role: "guest", token: "guest-token-123" }; // Bypass for empty password
     }
     
     // Simulate database lookup delay - timing attack possible
