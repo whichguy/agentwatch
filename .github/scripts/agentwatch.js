@@ -154,7 +154,6 @@ async function handleComment(context, github) {
     }
     
     // 4. Confirm command execution
-    const agentLabel = `agentwatch:${agentName}`;
     let confirmMessage;
     
     if (targetFiles.length > 0) {
@@ -174,6 +173,11 @@ The agent:
 - 🔄 **Will run** on future files matching this pattern
 - 📝 **Will trigger** in future PRs with matching files
 
+**Labels**:
+- 🎯 **Running**: \`agentwatch:running\` (while executing)
+- ✅ **Completed**: \`agent:seen:${agentName}\` (after success)
+- ❌ **Error**: \`agentwatch:error\` (if failed)
+
 To stop watching this pattern, use \`@agent-unwatch ${fileTarget}\`.`;
     } else {
       confirmMessage = `✅ **AgentWatch: Pattern Registered**
@@ -186,6 +190,11 @@ To stop watching this pattern, use \`@agent-unwatch ${fileTarget}\`.`;
 ⚠️ No files currently match this pattern, but the pattern is saved for:
 - 🔄 **Future pushes** to this PR that add matching files
 - 📝 **Future PRs** with matching files
+
+**Labels** (when triggered):
+- 🎯 **Running**: \`agentwatch:running\` (while executing)
+- ✅ **Completed**: \`agent:seen:${agentName}\` (after success)
+- ❌ **Error**: \`agentwatch:error\` (if failed)
 
 To stop watching this pattern, use \`@agent-unwatch ${fileTarget}\`.`;
     }
