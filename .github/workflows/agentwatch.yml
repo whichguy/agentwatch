@@ -8,10 +8,13 @@ name: AgentWatch
 #   test-*.js            - files matching test-*.js
 #   {app,lib}/*.js       - JS files in app/ or lib/ directories
 #
-# Commands:
+# Commands in Pull Requests:
 #   @agent-watch <pattern> <agent> <args> - Start watching files matching pattern
 #   @agent-unwatch <pattern>              - Stop watching pattern
 #   @agent-list                           - Show all active patterns
+#
+# Commands in Issues:
+#   @agent-run <agent> <args>             - Run agent directly in issue context
 #
 # Agents can be loaded from:
 #   1. Your repo: .github/agents/<agent>.js
@@ -23,6 +26,8 @@ on:
     types: [created]
   issue_comment:
     types: [created]
+  issues:
+    types: [opened]
   pull_request:
     types: [opened, synchronize]
 
