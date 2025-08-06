@@ -402,31 +402,35 @@ async function handleUnwatch(context, github) {
   const comment = context.payload.comment.body;
   console.log('Processing @agent-unwatch command...');
   
-  // Parse unwatch command: @agent-unwatch <pattern>
-  const unwatchMatch = comment.match(/@agent-unwatch\s+([^\s]+)/);
+  // Parse unwatch command: @agent-unwatch <agent> <pattern>
+  const unwatchMatch = comment.match(/@agent-unwatch\s+(\w+)\s+([^\s]+)/);
   if (!unwatchMatch) {
-    await postError(context, github, 'Invalid @agent-unwatch command format. Use: @agent-unwatch <pattern>');
+    await postError(context, github, 'Invalid @agent-unwatch command format. Use: @agent-unwatch <agent> <pattern>');
     return;
   }
   
-  const fileToUnwatch = unwatchMatch[1];
+  const [, agentName, pattern] = unwatchMatch;
   const prNumber = context.payload.pull_request?.number || context.payload.issue?.number;
   
   let confirmMessage;
-  if (fileToUnwatch === '*') {
-    confirmMessage = `✅ **AgentWatch: All Patterns Cleared**
+  if (pattern === '*') {
+    confirmMessage = `✅ **AgentWatch: All Patterns Excluded for ${agentName}**
 
-🚫 **Cleared all watch patterns** - No files will be automatically monitored in future PRs.
+🚫 **Agent**: ${agentName}
+🎯 **Pattern**: \`*\` (all files)
 
-**Note**: This only affects future PRs. To stop monitoring in the current PR, remove the agentwatch labels.`;
+**${agentName}** will not process any files in future PRs.
+
+**Note**: This creates an exclude rule. Use \`@agent-watch ${pattern} ${agentName}\` to re-enable.`;
   } else {
-    confirmMessage = `✅ **AgentWatch: Pattern Unwatched**
+    confirmMessage = `✅ **AgentWatch: Pattern Excluded for ${agentName}**
 
-🎯 **Pattern**: \`${fileToUnwatch}\`
+🚫 **Agent**: ${agentName}  
+🎯 **Pattern**: \`${pattern}\`
 
-Files matching this pattern will no longer be automatically monitored in future PRs.
+Files matching this pattern will be excluded from **${agentName}** processing in future PRs.
 
-**Note**: This only affects future PRs. To stop monitoring in the current PR, remove the agentwatch labels.`;
+**Note**: This creates an exclude rule. The agent will still process files matching include patterns but not matching this exclude pattern.`;
   }
 
   // Post confirmation
@@ -447,7 +451,7 @@ Files matching this pattern will no longer be automatically monitored in future 
     });
   }
   
-  console.log(`Unwatched file: ${fileToUnwatch}`);
+  console.log(`Added exclude pattern for ${agentName}: ${pattern}`);
 }
 
 async function handleFileChanges(context, github) {
