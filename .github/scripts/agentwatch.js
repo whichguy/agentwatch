@@ -171,19 +171,29 @@ async function handleNewPR(context, github) {
   console.log('New PR detected - checking for existing AgentWatch configurations...');
   
   try {
-    // Get all existing PRs that are closed and look for @agentwatch comments
+    // Get all existing PRs (both open and closed) and look for @agentwatch comments
     // to see what agents were previously used on similar files
-    const prs = await github.rest.pulls.list({
-      owner: context.repo.owner,
-      repo: context.repo.repo,
-      state: 'closed',
-      per_page: 50
-    });
+    const [openPRs, closedPRs] = await Promise.all([
+      github.rest.pulls.list({
+        owner: context.repo.owner,
+        repo: context.repo.repo,
+        state: 'open',
+        per_page: 25
+      }),
+      github.rest.pulls.list({
+        owner: context.repo.owner,
+        repo: context.repo.repo,
+        state: 'closed',
+        per_page: 25
+      })
+    ]);
+    
+    const prs = [...openPRs.data, ...closedPRs.data];
     
     const watchConfigs = [];
     
-    // Look through recent closed PRs for @agentwatch patterns
-    for (const pr of prs.data.slice(0, 10)) { // Check last 10 PRs
+    // Look through recent PRs for @agentwatch patterns
+    for (const pr of prs.slice(0, 10)) { // Check last 10 PRs
       try {
         const comments = await github.rest.pulls.listReviewComments({
           owner: context.repo.owner,
