@@ -78,14 +78,25 @@ ${firstLines}
 - \`@agentwatch echo preview\` - Show file preview
 - \`@agentwatch echo test --verbose\` - Echo with args`;
   
-  // Post response as reply to original comment
-  await github.rest.pulls.createReplyForReviewComment({
-    owner: context.repo.owner,
-    repo: context.repo.repo,
-    pull_number: context.pr_number,
-    comment_id: context.comment_id,
-    body: message
-  });
+  // Post response (reply to comment or general PR comment)
+  if (context.comment_id) {
+    // Reply to specific comment
+    await github.rest.pulls.createReplyForReviewComment({
+      owner: context.repo.owner,
+      repo: context.repo.repo,
+      pull_number: context.pr_number,
+      comment_id: context.comment_id,
+      body: message
+    });
+  } else {
+    // Post general PR comment for auto mode
+    await github.rest.issues.createComment({
+      owner: context.repo.owner,
+      repo: context.repo.repo,
+      issue_number: context.pr_number,
+      body: `**${context.file_path}**: ${message}`
+    });
+  }
   
   console.log('Echo agent completed successfully');
 }
