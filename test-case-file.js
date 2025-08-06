@@ -2,4 +2,5 @@
 function testCase() {
   console.log('Testing agentwatch pattern persistence');
   console.log('This file should be auto-detected in future PRs');
+  console.log('Updated: This change should trigger auto-detection');
 }
