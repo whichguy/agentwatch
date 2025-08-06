@@ -1,6 +1,6 @@
 name: AgentWatch
 # File-targeted agent monitoring system
-# Usage: @agentwatch <agent> <file|*> <args> in PR or file comments
+# Usage: @agentwatch <file|*> <agent> <args> in PR or file comments
 
 on:
   pull_request_review_comment:

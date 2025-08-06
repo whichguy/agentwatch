@@ -39,16 +39,16 @@ async function handleComment(context, github) {
 
   console.log('Processing @agentwatch command...');
   
-  // Parse command: @agentwatch <agent> <file_target> <args>
-  // Examples: @agentwatch echo fresh-security-test.js preview
-  //          @agentwatch promptexpert * security --deep
-  const agentMatch = comment.match(/@agentwatch\s+(\w+)\s+([^\s]+)\s*(.*)/);
+  // Parse command: @agentwatch <file_target> <agent> <args>
+  // Examples: @agentwatch fresh-security-test.js echo preview
+  //          @agentwatch * promptexpert security --deep
+  const agentMatch = comment.match(/@agentwatch\s+([^\s]+)\s+(\w+)\s*(.*)/);
   if (!agentMatch) {
-    await postError(context, github, 'Invalid @agentwatch command format. Use: @agentwatch <agent> <file|*> <args>');
+    await postError(context, github, 'Invalid @agentwatch command format. Use: @agentwatch <file|*> <agent> <args>');
     return;
   }
   
-  const [, agentName, fileTarget, argsString] = agentMatch;
+  const [, fileTarget, agentName, argsString] = agentMatch;
   
   // Get PR number from either pull request or issue context
   const prNumber = context.payload.pull_request?.number || context.payload.issue?.number;
@@ -300,11 +300,11 @@ async function postError(context, github, message) {
 
 ${message}
 
-**Usage**: \`@agentwatch <agent> <file|*> <args>\`
+**Usage**: \`@agentwatch <file|*> <agent> <args>\`
 **Examples**:
-- \`@agentwatch echo fresh-security-test.js preview\` - analyze specific file
-- \`@agentwatch promptexpert * security --deep\` - analyze all files in PR
-- \`@agentwatch lint src/utils.js\` - lint specific file`;
+- \`@agentwatch fresh-security-test.js echo preview\` - analyze specific file
+- \`@agentwatch * promptexpert security --deep\` - analyze all files in PR
+- \`@agentwatch src/utils.js lint\` - lint specific file`;
 
   try {
     const prNumber = context.payload.pull_request?.number || context.payload.issue?.number;
