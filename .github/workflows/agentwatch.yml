@@ -9,12 +9,16 @@ name: AgentWatch
 #   {app,lib}/*.js       - JS files in app/ or lib/ directories
 #
 # Commands in Pull Requests:
-#   @agent-watch <pattern> <agent> <args> - Start watching files matching pattern
-#   @agent-unwatch <pattern>              - Stop watching pattern
-#   @agent-list                           - Show all active patterns
+#   @agent-watch [options] <pattern> <agent> [@ <agent-args>] - Start watching files
+#   @agent-unwatch <agent> <pattern>                          - Exclude pattern for agent
+#   @agent-list                                                - Show all patterns/exclusions
 #
 # Commands in Issues:
-#   @agent-run <agent> <args>             - Run agent directly in issue context
+#   @agent-run <agent> [@ <args>]                             - Run agent in issue context
+#
+# The @ separator allows distinguishing agentwatch options from agent arguments:
+#   @agent-watch --persist *.js echo @ --verbose --debug
+#   (--persist is for agentwatch, --verbose --debug go to the echo agent)
 #
 # Agents can be loaded from:
 #   1. Your repo: .github/agents/<agent>.js

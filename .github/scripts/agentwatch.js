@@ -249,8 +249,8 @@ async function handleWatchList(context, github) {
     ]);
     
     const allPRs = [...openPRs.data, ...closedPRs.data];
-    const watchPatterns = new Map(); // file -> { agent, args, sourcePR, timestamp }
-    const unwatchPatterns = new Set(); // files that have been unwatched
+    const watchPatterns = new Map(); // pattern -> { agent, args, sourcePR, timestamp }
+    const unwatchPatterns = new Map(); // agent -> Set of exclude patterns
     
     // Scan all PRs for @agentwatch patterns
     for (const pr of allPRs) {
@@ -280,16 +280,18 @@ async function handleWatchList(context, github) {
         for (const comment of allComments) {
           const body = comment.body;
           
-          // Check for unwatch command
-          const unwatchMatch = body.match(/@agent-unwatch\s+([^\s]+)/);
+          // Check for unwatch command: @agent-unwatch <agent> <pattern>
+          const unwatchMatch = body.match(/@agent-unwatch\s+(\w+)\s+([^\s]+)/);
           if (unwatchMatch) {
-            const fileToUnwatch = unwatchMatch[1];
-            if (fileToUnwatch === '*') {
-              watchPatterns.clear();
-            } else {
-              watchPatterns.delete(fileToUnwatch);
-              unwatchPatterns.add(fileToUnwatch);
+            const [, agentName, pattern] = unwatchMatch;
+            
+            // Initialize exclude set for this agent if needed
+            if (!unwatchPatterns.has(agentName)) {
+              unwatchPatterns.set(agentName, new Set());
             }
+            
+            // Add pattern to agent's exclude list
+            unwatchPatterns.get(agentName).add(pattern);
             continue;
           }
           
@@ -298,8 +300,7 @@ async function handleWatchList(context, github) {
           if (watchMatch) {
             const [, fileTarget, agentName, argsString] = watchMatch;
             
-            // Skip if this file was unwatched
-            if (unwatchPatterns.has(fileTarget)) continue;
+            // Note: Don't skip here - exclusions are checked at execution time
             
             // Store the pattern (most recent pattern wins)
             watchPatterns.set(fileTarget, {
@@ -524,8 +525,8 @@ async function handleNewPR(context, github) {
     ]);
     
     const allPRs = [...openPRs.data, ...closedPRs.data];
-    const watchPatterns = new Map(); // file -> { agent, args }
-    const unwatchPatterns = new Set(); // files that have been unwatched
+    const watchPatterns = new Map(); // pattern -> { agent, args }
+    const unwatchPatterns = new Map(); // agent -> Set of exclude patterns
     
     // Scan all PRs for @agentwatch patterns
     for (const pr of allPRs) {
@@ -557,20 +558,19 @@ async function handleNewPR(context, github) {
         for (const comment of allComments) {
           const body = comment.body;
           
-          // Check for unwatch command: @agent-unwatch <file>
-          const unwatchMatch = body.match(/@agent-unwatch\s+([^\s]+)/);
+          // Check for unwatch command: @agent-unwatch <agent> <pattern>
+          const unwatchMatch = body.match(/@agent-unwatch\s+(\w+)\s+([^\s]+)/);
           if (unwatchMatch) {
-            const fileToUnwatch = unwatchMatch[1];
-            if (fileToUnwatch === '*') {
-              // Unwatch all files
-              watchPatterns.clear();
-              console.log(`PR #${pr.number}: Unwatched all files`);
-            } else {
-              // Unwatch specific file
-              watchPatterns.delete(fileToUnwatch);
-              unwatchPatterns.add(fileToUnwatch);
-              console.log(`PR #${pr.number}: Unwatched ${fileToUnwatch}`);
+            const [, agentName, pattern] = unwatchMatch;
+            
+            // Initialize exclude set for this agent if needed
+            if (!unwatchPatterns.has(agentName)) {
+              unwatchPatterns.set(agentName, new Set());
             }
+            
+            // Add pattern to agent's exclude list
+            unwatchPatterns.get(agentName).add(pattern);
+            console.log(`PR #${pr.number}: Added exclude pattern for ${agentName}: ${pattern}`);
             continue;
           }
           
@@ -579,8 +579,7 @@ async function handleNewPR(context, github) {
           if (watchMatch) {
             const [, fileTarget, agentName, argsString] = watchMatch;
             
-            // Skip if this file was unwatched
-            if (unwatchPatterns.has(fileTarget)) continue;
+            // Note: Don't skip here - exclusions are checked at execution time
             
             // Store the pattern (most recent pattern wins)
             watchPatterns.set(fileTarget, {
@@ -612,7 +611,23 @@ async function handleNewPR(context, github) {
     
     // Check each pattern against all files
     for (const [patternStr, pattern] of watchPatterns) {
-      const matchingFiles = filesInPR.filter(file => matchPattern(patternStr, file));
+      const matchingFiles = filesInPR.filter(file => {
+        // Check if file matches the include pattern
+        if (!matchPattern(patternStr, file)) return false;
+        
+        // Check if file is excluded for this agent
+        if (unwatchPatterns.has(pattern.agent)) {
+          const excludePatterns = unwatchPatterns.get(pattern.agent);
+          for (const excludePattern of excludePatterns) {
+            if (matchPattern(excludePattern, file)) {
+              console.log(`File ${file} excluded from ${pattern.agent} by pattern ${excludePattern}`);
+              return false;
+            }
+          }
+        }
+        
+        return true;
+      });
       
       for (const file of matchingFiles) {
         // Avoid duplicate processing
@@ -689,22 +704,25 @@ You can still use manual commands: \`@agent-watch <file|*> <agent> <args>\``
 async function launchAgent(agentName, context, github) {
   console.log(`Launching agent: ${agentName}`);
   
-  // Add running label at the start
+  // Label definitions
   const runningLabel = 'agentwatch:running';
-  const errorLabel = 'agentwatch:error';
-  const agentLabel = `agentwatch:${agentName}`;
+  const failedLabel = 'agent:failed';
+  const seenLabel = `agent:seen:${agentName}`;
   
-  // Add running and agent labels
-  try {
-    await github.rest.issues.addLabels({
-      owner: context.repo.owner,
-      repo: context.repo.repo,
-      issue_number: context.pr_number,
-      labels: [agentLabel, runningLabel]
-    });
-    console.log(`Added labels: ${agentLabel}, ${runningLabel}`);
-  } catch (labelError) {
-    console.log(`Could not add labels: ${labelError.message}`);
+  // Add running label at the start
+  const targetNumber = context.pr_number || context.issue_number;
+  if (targetNumber) {
+    try {
+      await github.rest.issues.addLabels({
+        owner: context.repo.owner,
+        repo: context.repo.repo,
+        issue_number: targetNumber,
+        labels: [runningLabel]
+      });
+      console.log(`Added running label: ${runningLabel}`);
+    } catch (labelError) {
+      console.log(`Could not add running label: ${labelError.message}`);
+    }
   }
   
   let agentError = null;
@@ -774,18 +792,52 @@ Failed to run agent **${agentName}**: ${agentError.message}
       console.log(`Could not remove running label: ${labelError.message}`);
     }
     
-    // Add error label if there was an error
-    if (agentError) {
-      try {
-        await github.rest.issues.addLabels({
-          owner: context.repo.owner,
-          repo: context.repo.repo,
-          issue_number: context.pr_number,
-          labels: [errorLabel]
-        });
-        console.log(`Added error label due to: ${agentError.message}`);
-      } catch (labelError) {
-        console.log(`Could not add error label: ${labelError.message}`);
+    // Add appropriate completion label
+    if (targetNumber) {
+      if (agentError) {
+        // Add failed label on failure
+        try {
+          await github.rest.issues.addLabels({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            issue_number: targetNumber,
+            labels: [failedLabel]
+          });
+          console.log(`Added failed label due to: ${agentError.message}`);
+          
+          // Post error details as PR comment
+          const errorComment = `❌ **Agent Failed: ${agentName}**
+
+**Error**: ${agentError.message}
+
+**Context**:
+- File: ${context.file_path || 'N/A'}
+- Trigger: ${context.trigger || 'unknown'}
+
+Please check the agent implementation or arguments.`;
+          
+          await github.rest.issues.createComment({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            issue_number: targetNumber,
+            body: errorComment
+          });
+        } catch (labelError) {
+          console.log(`Could not add failed label: ${labelError.message}`);
+        }
+      } else {
+        // Add seen label on success
+        try {
+          await github.rest.issues.addLabels({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            issue_number: targetNumber,
+            labels: [seenLabel]
+          });
+          console.log(`Added seen label: ${seenLabel}`);
+        } catch (labelError) {
+          console.log(`Could not add seen label: ${labelError.message}`);
+        }
       }
     }
   }
@@ -796,19 +848,22 @@ async function postError(context, github, message) {
 
 ${message}
 
-**Usage**: \`@agent-watch <pattern> <agent> <args>\` or \`@agent-unwatch <pattern>\` or \`@agent-list\`
+**Usage**: 
+- \`@agent-watch [options] <pattern> <agent> [@ <agent-args>]\`
+- \`@agent-unwatch <agent> <pattern>\`
+- \`@agent-list\`
+- \`@agent-run <agent> [@ <args>]\` (in issues)
 
 **Pattern Examples**:
-- \`@agent-watch *.js echo lint\` - all .js files
-- \`@agent-watch src/**/*.ts typescript check\` - all .ts files under src/
-- \`@agent-watch test-*.js test runner\` - files matching test-*.js
-- \`@agent-watch {app,lib}/*.js lint strict\` - .js files in app/ or lib/
-- \`@agent-watch * security scan\` - all files
+- \`@agent-watch *.js echo @ lint\` - all .js files with agent args
+- \`@agent-watch src/**/*.ts typescript @ check --strict\` - TypeScript files  
+- \`@agent-watch test-*.js test\` - files matching test-*.js, no agent args
+- \`@agent-watch --persist {app,lib}/*.js lint @ strict\` - with watch options
 
 **Commands**:
-- \`@agent-unwatch *.js\` - stop watching pattern
-- \`@agent-unwatch *\` - clear all patterns
-- \`@agent-list\` - list all active patterns`;
+- \`@agent-unwatch echo *.js\` - stop echo agent from watching *.js
+- \`@agent-unwatch security *\` - exclude all files from security agent
+- \`@agent-list\` - list all active patterns and exclusions`;
 
   try {
     const prNumber = context.payload.pull_request?.number || context.payload.issue?.number;
@@ -836,6 +891,54 @@ ${message}
   }
 }
 
+async function handleIssueComment(context, github) {
+  console.log('Processing issue comment...');
+  const comment = context.payload.comment.body;
+  
+  // Check for @agent-run command in issues
+  if (!comment.includes('@agent-run')) {
+    console.log('No @agent-run command found in issue comment');
+    return;
+  }
+  
+  // Support @ separator for agent args
+  const fullCommand = comment.match(/@agent-run\s+(.+)/)?.[1] || '';
+  let agentName, argsString = '';
+  
+  if (fullCommand.includes(' @ ')) {
+    const parts = fullCommand.split(' @ ', 2);
+    agentName = parts[0].trim();
+    argsString = parts[1].trim();
+  } else {
+    const match = fullCommand.match(/^(\w+)\s*(.*)/);
+    if (!match) {
+      await postError(context, github, 'Invalid @agent-run command format. Use: @agent-run <agent> [@ <args>]');
+      return;
+    }
+    [, agentName, argsString] = match;
+  }
+  
+  const issueContext = {
+    issue_number: context.payload.issue.number,
+    comment_id: context.payload.comment.id,
+    agent: agentName,
+    args: argsString.trim(),
+    repo: {
+      owner: context.repo.owner,
+      name: context.repo.repo
+    },
+    trigger: 'issue_command'
+  };
+  
+  console.log(`Launching ${agentName} for issue #${context.payload.issue.number}`);
+  await launchAgent(agentName, issueContext, github);
+}
+
+async function handleNewIssue(context, github) {
+  console.log('New issue detected');
+  // Could add auto-agent detection for issues here if needed
+}
+
 // Export for GitHub Actions
 module.exports = {
   handleAgentWatch,
@@ -844,5 +947,7 @@ module.exports = {
   handleUnwatch,
   handleFileChanges,
   handleNewPR,
+  handleIssueComment,
+  handleNewIssue,
   launchAgent
 };
