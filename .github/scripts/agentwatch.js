@@ -124,13 +124,14 @@ async function handleFileChanges(context, github) {
     const changedFiles = files.data.map(f => f.filename);
     console.log(`Changed files: ${changedFiles.join(', ')}`);
     
-    // Get all review comments to find watch commands
+    // Get all review comments to find watch commands IN THIS PR
     const comments = await github.rest.pulls.listReviewComments({
       owner: context.repo.owner,
       repo: context.repo.repo,
       pull_number: context.payload.pull_request.number
     });
     
+    // Only monitor files that have @agentwatch comments IN THIS PR
     const watchComments = comments.data.filter(c => 
       c.body.includes('@agentwatch') && 
       changedFiles.includes(c.path)
@@ -168,149 +169,12 @@ async function handleFileChanges(context, github) {
 }
 
 async function handleNewPR(context, github) {
-  console.log('New PR detected - checking for existing AgentWatch configurations...');
+  console.log('New PR detected - skipping automatic analysis (manual-only mode)');
   
-  try {
-    // Get all existing PRs (both open and closed) and look for @agentwatch comments
-    // to see what agents were previously used on similar files
-    const [openPRs, closedPRs] = await Promise.all([
-      github.rest.pulls.list({
-        owner: context.repo.owner,
-        repo: context.repo.repo,
-        state: 'open',
-        per_page: 25
-      }),
-      github.rest.pulls.list({
-        owner: context.repo.owner,
-        repo: context.repo.repo,
-        state: 'closed',
-        per_page: 25
-      })
-    ]);
-    
-    const prs = [...openPRs.data, ...closedPRs.data];
-    
-    const watchConfigs = [];
-    
-    // Look through recent PRs for @agentwatch patterns
-    for (const pr of prs.slice(0, 10)) { // Check last 10 PRs
-      try {
-        const comments = await github.rest.pulls.listReviewComments({
-          owner: context.repo.owner,
-          repo: context.repo.repo,
-          pull_number: pr.number
-        });
-        
-        for (const comment of comments.data) {
-          const agentMatch = comment.body.match(/@agentwatch\s+(\w+)\s*(.*)/);
-          if (agentMatch) {
-            watchConfigs.push({
-              file_pattern: comment.path,
-              agent: agentMatch[1],
-              args: agentMatch[2].trim()
-            });
-          }
-        }
-      } catch (err) {
-        // Skip errors from individual PRs
-        continue;
-      }
-    }
-    
-    if (watchConfigs.length === 0) {
-      console.log('No previous AgentWatch configurations found - skipping auto mode');
-      return;
-    }
-    
-    console.log(`Found ${watchConfigs.length} previous AgentWatch configurations`);
-    
-    // Get files in the new PR
-    const files = await github.rest.pulls.listFiles({
-      owner: context.repo.owner,
-      repo: context.repo.repo,
-      pull_number: context.payload.pull_request.number
-    });
-    
-    let matchedFiles = 0;
-    
-    // Apply previous configurations to matching files
-    for (const file of files.data) {
-      for (const config of watchConfigs) {
-        // Check if file matches the pattern (exact match or extension match)
-        const fileMatches = file.filename === config.file_pattern || 
-                           file.filename.endsWith(path.extname(config.file_pattern));
-        
-        if (fileMatches) {
-          matchedFiles++;
-          
-          const fileContext = {
-            file_path: file.filename,
-            pr_number: context.payload.pull_request.number,
-            comment_id: null, // No specific comment for auto mode
-            agent: config.agent,
-            args: config.args,
-            repo: {
-              owner: context.repo.owner,
-              name: context.repo.repo
-            },
-            trigger: 'auto_new_pr'
-          };
-          
-          console.log(`Auto-launching ${config.agent} for: ${file.filename} (matched pattern: ${config.file_pattern})`);
-          await launchAgent(config.agent, fileContext, github);
-          
-          // Add corresponding label
-          await github.rest.issues.addLabels({
-            owner: context.repo.owner,
-            repo: context.repo.repo,
-            issue_number: context.payload.pull_request.number,
-            labels: [`agentwatch:${config.agent}`]
-          });
-          
-          break; // Only apply first matching config per file
-        }
-      }
-    }
-    
-    if (matchedFiles > 0) {
-      // Post summary comment on the PR
-      const summary = `🤖 **AgentWatch: Auto-Analysis Based on Previous Configurations**
-
-📊 **Files Analyzed**: ${matchedFiles}
-🔍 **Configurations Applied**: Found patterns from previous PRs
-🏷️ **Monitoring**: Active (agents will re-run on changes)
-
-These agents were automatically applied based on previous \`@agentwatch\` usage patterns in this repository.
-
-**Manual Commands Available**: Comment \`@agentwatch <agent> <args>\` on any file for custom analysis.`;
-
-      await github.rest.issues.createComment({
-        owner: context.repo.owner,
-        repo: context.repo.repo,
-        issue_number: context.payload.pull_request.number,
-        body: summary
-      });
-    }
-    
-    console.log(`Automatic PR analysis completed - matched ${matchedFiles} files`);
-    
-  } catch (error) {
-    console.error('Error in handleNewPR:', error);
-    
-    // Post error comment only if it's a significant error
-    if (error.status !== 404) {
-      await github.rest.issues.createComment({
-        owner: context.repo.owner,
-        repo: context.repo.repo,
-        issue_number: context.payload.pull_request.number,
-        body: `❌ **AgentWatch Auto-Analysis Error**
-
-Failed to run automatic analysis: ${error.message}
-
-You can still use manual commands: \`@agentwatch <agent> <args>\` on specific files.`
-      });
-    }
-  }
+  // In manual-only mode, new PRs don't trigger automatic analysis
+  // Users must manually add @agentwatch comments to files they want analyzed
+  
+  console.log('AgentWatch is ready for manual commands: @agentwatch <agent> <args>');
 }
 
 async function launchAgent(agentName, context, github) {
