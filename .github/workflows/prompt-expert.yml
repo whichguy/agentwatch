@@ -1,4 +1,4 @@
-name: Prompt Expert Integration
+name: prompt-expert
 
 on:
   workflow_call:
