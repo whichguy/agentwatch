@@ -1,0 +1,105 @@
+name: Prompt Expert Integration
+
+on:
+  workflow_call:
+    inputs:
+      expert:
+        description: 'Expert to use (e.g., security, performance, etc.)'
+        required: true
+        type: string
+      pattern:
+        description: 'File pattern to analyze'
+        required: false
+        type: string
+        default: '*.md'
+  issue_comment:
+    types: [created]
+  pull_request_comment:
+    types: [created]
+
+jobs:
+  run-prompt-expert:
+    if: |
+      (github.event_name == 'workflow_call') ||
+      (contains(github.event.comment.body, '@agent-watch') && contains(github.event.comment.body, 'promptexpert'))
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Parse AgentWatch command
+        id: parse
+        if: github.event_name != 'workflow_call'
+        run: |
+          COMMENT='${{ github.event.comment.body }}'
+          
+          # Extract pattern and expert from @agent-watch command
+          # Format: @agent-watch <pattern> promptexpert @ <expert>
+          if [[ "$COMMENT" =~ @agent-watch[[:space:]]+([^[:space:]]+)[[:space:]]+promptexpert[[:space:]]*@[[:space:]]*([^[:space:]]+) ]]; then
+            PATTERN="${BASH_REMATCH[1]}"
+            EXPERT="${BASH_REMATCH[2]}"
+            
+            echo "pattern=$PATTERN" >> $GITHUB_OUTPUT
+            echo "expert=$EXPERT" >> $GITHUB_OUTPUT
+            echo "valid=true" >> $GITHUB_OUTPUT
+          else
+            echo "valid=false" >> $GITHUB_OUTPUT
+          fi
+          
+      - name: Set variables
+        id: vars
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_call" ]; then
+            echo "expert=${{ inputs.expert }}" >> $GITHUB_OUTPUT
+            echo "pattern=${{ inputs.pattern }}" >> $GITHUB_OUTPUT
+          else
+            echo "expert=${{ steps.parse.outputs.expert }}" >> $GITHUB_OUTPUT
+            echo "pattern=${{ steps.parse.outputs.pattern }}" >> $GITHUB_OUTPUT
+          fi
+          
+      - name: Find matching files
+        id: files
+        run: |
+          FILES=$(find . -type f -name "${{ steps.vars.outputs.pattern }}" | head -10)
+          echo "files<<EOF" >> $GITHUB_OUTPUT
+          echo "$FILES" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+          
+      - name: Trigger PromptExpert on each file
+        if: steps.files.outputs.files != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Get PR number
+          if [ -n "${{ github.event.issue.number }}" ]; then
+            PR_NUMBER="${{ github.event.issue.number }}"
+          elif [ -n "${{ github.event.pull_request.number }}" ]; then
+            PR_NUMBER="${{ github.event.pull_request.number }}"
+          else
+            echo "No PR context found"
+            exit 1
+          fi
+          
+          # Post promptexpert command for each file
+          echo "${{ steps.files.outputs.files }}" | while read -r file; do
+            if [ -n "$file" ]; then
+              echo "Analyzing $file with expert: ${{ steps.vars.outputs.expert }}"
+              
+              # Post the promptexpert command
+              gh pr comment $PR_NUMBER --body "@promptexpert ${{ steps.vars.outputs.expert }} analyze $file for security, best practices, and improvements"
+              
+              sleep 2  # Rate limiting
+            fi
+          done
+          
+      - name: Summary
+        run: |
+          echo "## Prompt Expert Analysis Triggered"
+          echo "- Expert: ${{ steps.vars.outputs.expert }}"
+          echo "- Pattern: ${{ steps.vars.outputs.pattern }}"
+          echo "- Files analyzed:"
+          echo "${{ steps.files.outputs.files }}"
