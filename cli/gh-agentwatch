@@ -523,23 +523,52 @@ WORKFLOW
     echo ""
     echo -e "${GREEN}✅ All workflows created${NC}"
     
-    read -p "Commit and push? (y/n) " -n 1 -r
-    echo
-    if [[ $REPLY =~ ^[Yy]$ ]]; then
-        git add .github/workflows/
-        git commit -m "Add AgentWatch workflows (watch, review, test, format)"
-        git push
-        echo -e "${GREEN}✅ AgentWatch fully enabled!${NC}"
+    # Check if there are changes to commit
+    if git diff --quiet .github/workflows/ 2>/dev/null && git diff --cached --quiet .github/workflows/ 2>/dev/null; then
+        echo -e "${YELLOW}No changes needed - workflows are already up to date${NC}"
+        echo -e "${GREEN}✅ AgentWatch is ready to use!${NC}"
+    else
         echo ""
-        echo "You can now use:"
-        echo "  @agent-watch    - Watch files"
-        echo "  @agent-unwatch  - Stop watching"
-        echo "  @agent-list     - List watchers"
-        echo "  @agent-run      - Run agents"
-        echo "  @agent-review   - Code review"
-        echo "  @agent-test     - Run tests"
-        echo "  @agent-format   - Format code"
+        echo -e "${CYAN}Committing and pushing workflows to GitHub...${NC}"
+        
+        # Add, commit, and push automatically
+        git add .github/workflows/agentwatch.yml \
+                .github/workflows/agent-review.yml \
+                .github/workflows/agent-test.yml \
+                .github/workflows/agent-format.yml 2>/dev/null
+        
+        if git commit -m "Enable AgentWatch workflows via gh agentwatch CLI
+
+Added 4 core workflows:
+- agentwatch.yml: Main file watcher and command processor
+- agent-review.yml: Automated code review
+- agent-test.yml: Test runner for changed files
+- agent-format.yml: Code formatting automation
+
+Use 'gh agentwatch help' for available commands" 2>/dev/null; then
+            if git push 2>/dev/null; then
+                echo -e "${GREEN}✅ Workflows pushed to GitHub successfully!${NC}"
+            else
+                echo -e "${YELLOW}⚠️  Could not push automatically. Run 'git push' manually.${NC}"
+            fi
+        else
+            echo -e "${YELLOW}Workflows already committed${NC}"
+        fi
+        
+        echo ""
+        echo -e "${GREEN}✅ AgentWatch fully enabled and active on GitHub!${NC}"
     fi
+    
+    echo ""
+    echo "You can now use these commands:"
+    echo -e "  ${CYAN}gh agentwatch watch${NC} '<pattern>' <agent>  - Start watching files"
+    echo -e "  ${CYAN}gh agentwatch unwatch${NC} <agent> '<pattern>' - Stop watching"
+    echo -e "  ${CYAN}gh agentwatch list${NC}                        - List active watchers"
+    echo -e "  ${CYAN}gh agentwatch review${NC}                      - Request code review"
+    echo -e "  ${CYAN}gh agentwatch test${NC} [pattern]              - Run tests"
+    echo -e "  ${CYAN}gh agentwatch format${NC} [pattern]            - Format code"
+    echo ""
+    echo "Or use @agent-* commands directly in GitHub issues/PRs"
 }
 
 # Status command
