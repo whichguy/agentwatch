@@ -1,0 +1,679 @@
+#!/bin/bash
+set -e
+
+# GitHub CLI extension for AgentWatch
+# Install: gh extension install whichguy/gh-agentwatch
+# Usage: gh agentwatch <command> [args]
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+NC='\033[0m' # No Color
+
+COMMAND="${1}"
+shift || true
+
+# Get current repo info
+get_current_repo() {
+    if ! git rev-parse --git-dir > /dev/null 2>&1; then
+        echo -e "${RED}Error: Not in a git repository${NC}" >&2
+        exit 1
+    fi
+    
+    local remote_url=$(git config --get remote.origin.url 2>/dev/null)
+    
+    if [ -z "$remote_url" ]; then
+        echo -e "${RED}Error: No origin remote found${NC}" >&2
+        exit 1
+    fi
+    
+    if [[ "$remote_url" =~ github.com[:/]([^/]+)/([^/.]+)(\.git)?$ ]]; then
+        echo "${BASH_REMATCH[1]}/${BASH_REMATCH[2]}"
+    else
+        echo -e "${RED}Error: Could not parse GitHub repository from remote URL${NC}" >&2
+        exit 1
+    fi
+}
+
+# Find the most recent open PR or issue
+find_context() {
+    local repo=$(get_current_repo)
+    
+    # First, try to find an open PR from current branch
+    local current_branch=$(git branch --show-current)
+    local pr_number=$(gh pr list --head "$current_branch" --json number -q '.[0].number' 2>/dev/null)
+    
+    if [ -n "$pr_number" ]; then
+        echo "pr:$pr_number"
+        return
+    fi
+    
+    # Otherwise, find the most recent open issue
+    local issue_number=$(gh issue list --limit 1 --json number -q '.[0].number' 2>/dev/null)
+    
+    if [ -n "$issue_number" ]; then
+        echo "issue:$issue_number"
+        return
+    fi
+    
+    echo ""
+}
+
+# Post a comment to trigger AgentWatch
+post_agentwatch_command() {
+    local command="$1"
+    local context="$2"
+    local repo=$(get_current_repo)
+    
+    if [ -z "$context" ]; then
+        echo -e "${YELLOW}No open PR or issue found. Creating a new issue for AgentWatch commands...${NC}"
+        
+        # Create a new issue for AgentWatch
+        local issue_url=$(gh issue create \
+            --title "AgentWatch Commands" \
+            --body "This issue is for AgentWatch commands. Use comments to control agents and file watchers." \
+            2>/dev/null)
+        
+        # Extract issue number from URL
+        if [[ "$issue_url" =~ /([0-9]+)$ ]]; then
+            context="issue:${BASH_REMATCH[1]}"
+            echo -e "${GREEN}Created issue #${BASH_REMATCH[1]}${NC}"
+        else
+            echo -e "${RED}Failed to create issue${NC}"
+            exit 1
+        fi
+    fi
+    
+    # Determine if it's a PR or issue
+    local type="${context%%:*}"
+    local number="${context##*:}"
+    
+    echo -e "${BLUE}Posting to $type #$number: ${YELLOW}$command${NC}"
+    
+    if [ "$type" = "pr" ]; then
+        gh pr comment "$number" --body "$command"
+    else
+        gh issue comment "$number" --body "$command"
+    fi
+    
+    echo -e "${GREEN}✅ Command posted successfully${NC}"
+    
+    # Wait a moment for the workflow to trigger
+    sleep 2
+    
+    # Show workflow status
+    echo ""
+    echo "Checking workflow status..."
+    gh run list --workflow=agentwatch.yml --limit=1 2>/dev/null || echo "Workflow pending..."
+}
+
+# === AGENT COMMANDS ===
+
+# Watch command
+cmd_watch() {
+    local pattern="$1"
+    local agent="$2"
+    shift 2 || true
+    local args="$*"
+    
+    if [ -z "$pattern" ] || [ -z "$agent" ]; then
+        echo -e "${RED}Usage: gh agentwatch watch <pattern> <agent> [args]${NC}"
+        echo ""
+        echo "Examples:"
+        echo "  gh agentwatch watch '*.js' eslint"
+        echo "  gh agentwatch watch 'src/**/*.ts' typescript-check --strict"
+        echo "  gh agentwatch watch '*.py' ruff check --fix"
+        exit 1
+    fi
+    
+    local context=$(find_context)
+    local command="@agent-watch $pattern $agent"
+    
+    if [ -n "$args" ]; then
+        command="$command @ $args"
+    fi
+    
+    post_agentwatch_command "$command" "$context"
+}
+
+# Unwatch command
+cmd_unwatch() {
+    local agent="$1"
+    local pattern="$2"
+    
+    if [ -z "$agent" ] || [ -z "$pattern" ]; then
+        echo -e "${RED}Usage: gh agentwatch unwatch <agent> <pattern>${NC}"
+        echo ""
+        echo "Examples:"
+        echo "  gh agentwatch unwatch eslint '*.js'"
+        echo "  gh agentwatch unwatch typescript-check 'src/**/*.ts'"
+        exit 1
+    fi
+    
+    local context=$(find_context)
+    local command="@agent-unwatch $agent $pattern"
+    
+    post_agentwatch_command "$command" "$context"
+}
+
+# List command
+cmd_list() {
+    local context=$(find_context)
+    
+    if [ -z "$context" ]; then
+        echo -e "${YELLOW}No open PR or issue found${NC}"
+        echo "Create a PR or issue first, then use: gh agentwatch list"
+        exit 1
+    fi
+    
+    local command="@agent-list"
+    post_agentwatch_command "$command" "$context"
+    
+    # Try to fetch and display the response
+    local type="${context%%:*}"
+    local number="${context##*:}"
+    
+    echo ""
+    echo "Fetching active watchers..."
+    sleep 3
+    
+    if [ "$type" = "pr" ]; then
+        gh pr view "$number" --json comments -q '.comments[-1].body' 2>/dev/null | grep -E "Pattern:|Agent:|Status:" || echo "No response yet"
+    else
+        gh issue view "$number" --json comments -q '.comments[-1].body' 2>/dev/null | grep -E "Pattern:|Agent:|Status:" || echo "No response yet"
+    fi
+}
+
+# Run command - execute agent in issue context
+cmd_run() {
+    local agent="$1"
+    shift || true
+    local args="$*"
+    
+    if [ -z "$agent" ]; then
+        echo -e "${RED}Usage: gh agentwatch run <agent> [args]${NC}"
+        echo ""
+        echo "Examples:"
+        echo "  gh agentwatch run code-review"
+        echo "  gh agentwatch run test-runner --coverage"
+        exit 1
+    fi
+    
+    local context=$(find_context)
+    local command="@agent-run $agent"
+    
+    if [ -n "$args" ]; then
+        command="$command @ $args"
+    fi
+    
+    post_agentwatch_command "$command" "$context"
+}
+
+# Review command - trigger code review
+cmd_review() {
+    local args="$*"
+    local context=$(find_context)
+    local command="@agent-review"
+    
+    if [ -n "$args" ]; then
+        command="$command $args"
+    fi
+    
+    post_agentwatch_command "$command" "$context"
+    echo -e "${CYAN}Code review requested. Check PR/issue for results.${NC}"
+}
+
+# Test command - run tests on changed files
+cmd_test() {
+    local pattern="${1:-*}"
+    shift || true
+    local args="$*"
+    
+    local context=$(find_context)
+    local command="@agent-test $pattern"
+    
+    if [ -n "$args" ]; then
+        command="$command @ $args"
+    fi
+    
+    post_agentwatch_command "$command" "$context"
+    echo -e "${CYAN}Test run initiated for pattern: $pattern${NC}"
+}
+
+# Format command - auto-format code
+cmd_format() {
+    local pattern="${1:-*}"
+    shift || true
+    local args="$*"
+    
+    local context=$(find_context)
+    local command="@agent-format $pattern"
+    
+    if [ -n "$args" ]; then
+        command="$command @ $args"
+    fi
+    
+    post_agentwatch_command "$command" "$context"
+    echo -e "${CYAN}Format requested for pattern: $pattern${NC}"
+}
+
+# Enable-all command - enable AgentWatch in ALL user repos
+cmd_enable_all() {
+    echo -e "${YELLOW}⚠️  WARNING: Enable AgentWatch in ALL repositories${NC}"
+    echo ""
+    
+    # Get list of all repos
+    echo "Fetching your repositories..."
+    local repos=$(gh repo list whichguy --limit 1000 --json nameWithOwner -q '.[].nameWithOwner')
+    local total=$(echo "$repos" | wc -l | tr -d ' ')
+    
+    echo -e "${CYAN}This will affect ${YELLOW}${total} repositories${NC}:"
+    echo "$repos" | head -10
+    if [ $total -gt 10 ]; then
+        echo "... and $((total - 10)) more"
+    fi
+    echo ""
+    
+    echo -e "${YELLOW}This will add 4 workflow files to each repository:${NC}"
+    echo "  • .github/workflows/agentwatch.yml"
+    echo "  • .github/workflows/agent-review.yml"
+    echo "  • .github/workflows/agent-test.yml"
+    echo "  • .github/workflows/agent-format.yml"
+    echo ""
+    
+    echo -e "${RED}⚠️  This action cannot be easily undone!${NC}"
+    read -p "Are you SURE you want to enable AgentWatch in all $total repos? (yes/no) " -r
+    echo
+    
+    if [[ ! "$REPLY" == "yes" ]]; then
+        echo "Cancelled."
+        exit 0
+    fi
+    
+    # Second confirmation
+    read -p "Type the number of repos ($total) to confirm: " -r confirm_count
+    echo
+    
+    if [[ ! "$confirm_count" == "$total" ]]; then
+        echo "Confirmation failed. Expected: $total, Got: $confirm_count"
+        exit 1
+    fi
+    
+    echo -e "${GREEN}Starting batch enablement...${NC}"
+    echo ""
+    
+    local count=0
+    local success=0
+    local failed=0
+    
+    for repo in $repos; do
+        count=$((count + 1))
+        echo -e "[${count}/${total}] Processing ${YELLOW}$repo${NC}"
+        
+        # Create temp directory
+        local temp_dir=$(mktemp -d)
+        
+        # Clone repo
+        if gh repo clone "$repo" "$temp_dir" -- --depth=1 2>/dev/null; then
+            # Create workflows
+            mkdir -p "$temp_dir/.github/workflows"
+            
+            # Copy workflow files
+            create_workflow_files "$temp_dir"
+            
+            # Commit and push
+            cd "$temp_dir"
+            if git add .github/workflows/ 2>/dev/null && \
+               git commit -m "Add AgentWatch workflows" 2>/dev/null && \
+               git push 2>/dev/null; then
+                echo -e "  ${GREEN}✓${NC} Success"
+                ((success++))
+            else
+                echo -e "  ${YELLOW}⚠${NC} No changes needed or already exists"
+            fi
+            cd - > /dev/null
+        else
+            echo -e "  ${RED}✗${NC} Failed to clone"
+            ((failed++))
+        fi
+        
+        # Cleanup
+        rm -rf "$temp_dir"
+    done
+    
+    echo ""
+    echo -e "${GREEN}✅ Batch enablement complete!${NC}"
+    echo "  Successfully enabled: $success repos"
+    echo "  Already enabled/no changes: $((total - success - failed)) repos"
+    if [ $failed -gt 0 ]; then
+        echo "  Failed: $failed repos"
+    fi
+}
+
+# Helper function to create workflow files
+create_workflow_files() {
+    local dir="$1"
+    
+    # Create agentwatch.yml
+    cat > "$dir/.github/workflows/agentwatch.yml" << 'EOF'
+name: AgentWatch
+
+on:
+  issue_comment:
+    types: [created, edited]
+  pull_request_comment:
+    types: [created, edited]
+  workflow_dispatch:
+
+jobs:
+  agentwatch:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: whichguy/agentwatch@main
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+EOF
+    
+    # Add other workflow files similarly...
+}
+
+# === SETUP COMMANDS ===
+
+# Enable workflow in repo (with ALL agent-* workflows)
+cmd_enable() {
+    echo -e "${GREEN}🚀 Enabling ALL AgentWatch workflows...${NC}"
+    
+    mkdir -p .github/workflows
+    
+    # Base AgentWatch workflow
+    if [ ! -f ".github/workflows/agentwatch.yml" ]; then
+        cat > .github/workflows/agentwatch.yml << 'WORKFLOW'
+name: AgentWatch
+
+on:
+  issue_comment:
+    types: [created, edited]
+  pull_request_comment:
+    types: [created, edited]
+  pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+
+jobs:
+  agentwatch:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+      checks: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: whichguy/agentwatch@main
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+WORKFLOW
+        echo -e "${GREEN}✅ Created agentwatch.yml${NC}"
+    else
+        echo -e "${YELLOW}⚠️  agentwatch.yml already exists${NC}"
+    fi
+    
+    # Agent-review workflow
+    if [ ! -f ".github/workflows/agent-review.yml" ]; then
+        cat > .github/workflows/agent-review.yml << 'WORKFLOW'
+name: Agent Review
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+  issue_comment:
+    types: [created]
+
+jobs:
+  review:
+    if: >
+      github.event_name == 'pull_request' ||
+      (github.event.issue.pull_request && contains(github.event.comment.body, '@agent-review'))
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: whichguy/agentwatch@main
+        with:
+          command: review
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+WORKFLOW
+        echo -e "${GREEN}✅ Created agent-review.yml${NC}"
+    else
+        echo -e "${YELLOW}⚠️  agent-review.yml already exists${NC}"
+    fi
+    
+    # Agent-test workflow
+    if [ ! -f ".github/workflows/agent-test.yml" ]; then
+        cat > .github/workflows/agent-test.yml << 'WORKFLOW'
+name: Agent Test
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  issue_comment:
+    types: [created]
+
+jobs:
+  test:
+    if: >
+      github.event_name != 'issue_comment' ||
+      contains(github.event.comment.body, '@agent-test')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      checks: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: whichguy/agentwatch@main
+        with:
+          command: test
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+WORKFLOW
+        echo -e "${GREEN}✅ Created agent-test.yml${NC}"
+    else
+        echo -e "${YELLOW}⚠️  agent-test.yml already exists${NC}"
+    fi
+    
+    # Agent-format workflow
+    if [ ! -f ".github/workflows/agent-format.yml" ]; then
+        cat > .github/workflows/agent-format.yml << 'WORKFLOW'
+name: Agent Format
+
+on:
+  issue_comment:
+    types: [created]
+  workflow_dispatch:
+
+jobs:
+  format:
+    if: contains(github.event.comment.body, '@agent-format')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: whichguy/agentwatch@main
+        with:
+          command: format
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+WORKFLOW
+        echo -e "${GREEN}✅ Created agent-format.yml${NC}"
+    else
+        echo -e "${YELLOW}⚠️  agent-format.yml already exists${NC}"
+    fi
+    
+    echo ""
+    echo -e "${GREEN}✅ All workflows created${NC}"
+    
+    read -p "Commit and push? (y/n) " -n 1 -r
+    echo
+    if [[ $REPLY =~ ^[Yy]$ ]]; then
+        git add .github/workflows/
+        git commit -m "Add AgentWatch workflows (watch, review, test, format)"
+        git push
+        echo -e "${GREEN}✅ AgentWatch fully enabled!${NC}"
+        echo ""
+        echo "You can now use:"
+        echo "  @agent-watch    - Watch files"
+        echo "  @agent-unwatch  - Stop watching"
+        echo "  @agent-list     - List watchers"
+        echo "  @agent-run      - Run agents"
+        echo "  @agent-review   - Code review"
+        echo "  @agent-test     - Run tests"
+        echo "  @agent-format   - Format code"
+    fi
+}
+
+# Status command
+cmd_status() {
+    local repo=$(get_current_repo)
+    echo -e "${GREEN}Repository: ${YELLOW}$repo${NC}"
+    echo ""
+    
+    # Check which workflows exist
+    echo "Workflow Status:"
+    for workflow in agentwatch agent-review agent-test agent-format; do
+        if [ -f ".github/workflows/${workflow}.yml" ]; then
+            echo -e "  ${GREEN}✅${NC} ${workflow}"
+        else
+            echo -e "  ${RED}❌${NC} ${workflow}"
+        fi
+    done
+    
+    # Check for open PRs/issues
+    echo ""
+    local context=$(find_context)
+    if [ -n "$context" ]; then
+        local type="${context%%:*}"
+        local number="${context##*:}"
+        echo -e "${GREEN}✅ Active context: $type #$number${NC}"
+    else
+        echo -e "${YELLOW}⚠️  No open PR or issue${NC}"
+    fi
+    
+    # Show recent runs
+    echo ""
+    echo "Recent workflow runs:"
+    gh run list --limit=5 2>/dev/null | grep -E "agent|Agent" || echo "  No agent runs yet"
+}
+
+# Show help
+show_help() {
+    cat << 'EOF'
+GitHub CLI extension for AgentWatch
+
+USAGE: gh agentwatch <command> [args]
+
+AGENT COMMANDS (work from any repo):
+  watch <pattern> <agent> [args]   Start watching files matching pattern
+  unwatch <agent> <pattern>        Stop watching files
+  list                              List all active watchers
+  run <agent> [args]                Run agent in issue/PR context
+  review [args]                     Request code review
+  test [pattern] [args]             Run tests on files
+  format [pattern] [args]           Auto-format code
+
+SETUP COMMANDS:
+  enable                            Add ALL agent workflows to current repo
+  enable-all                        Add workflows to ALL your repos (use with caution!)
+  status                            Check workflow and context status
+  help                              Show this help message
+
+EXAMPLES:
+  # Enable all agent workflows in current repo
+  gh agentwatch enable
+
+  # Start watching files
+  gh agentwatch watch '*.js' eslint
+  gh agentwatch watch 'src/**/*.ts' typescript-check @ --strict
+
+  # Run agents
+  gh agentwatch run code-analyzer
+  gh agentwatch review
+  gh agentwatch test '*.spec.js'
+  gh agentwatch format '*.py'
+
+  # Manage watchers
+  gh agentwatch unwatch eslint '*.js'
+  gh agentwatch list
+
+PATTERN EXAMPLES:
+  *.js                   All JavaScript files
+  src/**/*.ts            All TypeScript files under src/
+  test-*.js              Files matching test-*.js
+  {app,lib}/*.js         JS files in app/ or lib/ directories
+
+AVAILABLE AGENT COMMANDS IN ISSUES/PRS:
+  @agent-watch <pattern> <agent>    Start watching
+  @agent-unwatch <agent> <pattern>  Stop watching
+  @agent-list                        List watchers
+  @agent-run <agent>                 Run agent
+  @agent-review                      Code review
+  @agent-test                        Run tests
+  @agent-format                      Format code
+
+EOF
+}
+
+# Main command handler
+case "$COMMAND" in
+    # Agent commands
+    watch)
+        cmd_watch "$@"
+        ;;
+    unwatch)
+        cmd_unwatch "$@"
+        ;;
+    list)
+        cmd_list
+        ;;
+    run)
+        cmd_run "$@"
+        ;;
+    review)
+        cmd_review "$@"
+        ;;
+    test)
+        cmd_test "$@"
+        ;;
+    format)
+        cmd_format "$@"
+        ;;
+    # Setup commands
+    enable)
+        cmd_enable
+        ;;
+    enable-all)
+        cmd_enable_all
+        ;;
+    status)
+        cmd_status
+        ;;
+    help|--help|-h|"")
+        show_help
+        ;;
+    *)
+        echo -e "${RED}Unknown command: $COMMAND${NC}"
+        echo ""
+        show_help
+        exit 1
+        ;;
+esac
